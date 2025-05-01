@@ -176,10 +176,10 @@ def handle_webhook():
         return jsonify({"status": "error", "message": "Invalid signal"}), 400
 
     if data['action'].lower() == 'buy':
-        success = bot.execute_buy(
-            symbol=data['symbol'],
-            price=float(data['price']),
-            trailing_percent=float(data.get('trailing_stop_percent', 0.02))
+        success = bot.execute_buy()
+        symbol=data['symbol'],
+        price=float(data['price']),
+        trailing_percent=float(data.get('trailing_stop_percent', 0.02))
         
         if success:
             return jsonify({"status": "success"})
