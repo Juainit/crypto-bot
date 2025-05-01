@@ -24,6 +24,7 @@ class TradingBot:
         })
         self.current_capital = float(os.getenv("INITIAL_CAPITAL", 40.0))
         self._init_db()
+        self.exchange.load_markets()  # Carga todos los mercados disponibles
 
     def _get_db_connection(self):
         return psycopg2.connect(os.getenv("DATABASE_URL"))
@@ -49,18 +50,29 @@ class TradingBot:
                 """)
                 conn.commit()
 
+    def _validate_symbol(self, symbol):
+        """Convierte 'BTCEUR' a formato Kraken (XBT/EUR) y valida"""
+        # Pares base de Kraken (ej: XBT para Bitcoin)
+        kraken_symbol = symbol.replace("BTC", "XBT").replace("EUR", "EUR")
+        if "/" not in kraken_symbol:
+            kraken_symbol = f"{kraken_symbol[:3]}/{kraken_symbol[3:]}"
+        
+        if kraken_symbol not in self.exchange.markets:
+            raise ValueError(f"Par no válido: {symbol}")
+        return kraken_symbol
+
     def execute_buy(self, symbol, trailing_percent):
         try:
-            # 1. Obtener precio de mercado y calcular límite
-            ticker = self.exchange.fetch_ticker(symbol)
-            current_price = ticker['ask']
-            limit_price = round(current_price * 1.01, 2)  # +1% para asegurar ejecución
+            # Validar y convertir símbolo (ej: BTCEUR → XBT/EUR)
+            kraken_symbol = self._validate_symbol(symbol)
             
-            # 2. Calcular cantidad con fee del 0.26%
-            max_invest = self.current_capital / (1.0026)
+            # Obtener precio y calcular límite (+1%)
+            ticker = self.exchange.fetch_ticker(kraken_symbol)
+            limit_price = round(ticker['ask'] * 1.01, 2)
+            max_invest = self.current_capital / 1.0026  # Ajuste por fee 0.26%
             quantity = round(max_invest / limit_price, 6)
-            
-            # 3. Registrar en DB
+
+            # Registrar en DB
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -68,20 +80,20 @@ class TradingBot:
                         (symbol, buy_price, quantity, trailing_percent, fee_paid, status)
                         VALUES (%s, %s, %s, %s, %s, 'pending')
                         RETURNING id;
-                    """, (symbol, limit_price, quantity, trailing_percent, max_invest * 0.0026))
+                    """, (kraken_symbol, limit_price, quantity, trailing_percent, max_invest * 0.0026))
                     position_id = cur.fetchone()[0]
                     conn.commit()
 
-            # 4. Ejecutar orden
+            # Ejecutar orden
             order = self.exchange.create_order(
-                symbol=symbol,
+                symbol=kraken_symbol,
                 type='limit',
                 side='buy',
                 amount=quantity,
                 price=limit_price
             )
 
-            # 5. Actualizar DB
+            # Actualizar DB
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -92,7 +104,7 @@ class TradingBot:
                     conn.commit()
 
             self.current_capital -= (quantity * limit_price + (max_invest * 0.0026))
-            logging.info(f"Compra: {quantity} {symbol} @ {limit_price}€")
+            logging.info(f"Compra: {quantity} {kraken_symbol} @ {limit_price}€")
             return position_id
 
         except Exception as e:
@@ -112,7 +124,7 @@ class TradingBot:
 
             while True:
                 ticker = self.exchange.fetch_ticker(symbol)
-                current_price = ticker['bid']  # Precio de venta actual
+                current_price = ticker['bid']
                 new_stop_loss = round(current_price * (1 - trailing_percent), 2)
 
                 with self._get_db_connection() as conn:
@@ -157,9 +169,8 @@ class TradingBot:
                             amount=quantity,
                             price=limit_price
                         )
-                        logging.info(f"Venta límite colocada @ {limit_price}€")
+                        logging.info(f"Venta límite @ {limit_price}€")
 
-                        # Esperar 2 minutos
                         time.sleep(120)
                         order_status = self.exchange.fetch_order(order['id'], symbol)
 
@@ -169,7 +180,7 @@ class TradingBot:
 
                     except Exception as e:
                         # 2. Fallback a market order
-                        logging.warning(f"Fallo límite. Ejecutando market order...")
+                        logging.warning(f"Fallo límite. Usando market order...")
                         order = self.exchange.create_order(
                             symbol=symbol,
                             type='market',
@@ -188,7 +199,7 @@ class TradingBot:
                     """, (order['price'], 'limit' if 'price' in order else 'market', position_id))
                     conn.commit()
 
-            logging.info(f"Venta exitosa: {order['amount']} {symbol} @ {order['price']}€")
+            logging.info(f"Venta exitosa @ {order['price']}€")
             return True
 
         except Exception as e:
@@ -205,15 +216,19 @@ def handle_webhook():
         return jsonify({"status": "error", "message": "Señal inválida"}), 400
 
     if data['action'].lower() == 'buy':
-        trailing_percent = float(data.get('trailing_stop_percent', 0.02))  # Default 2%
-        position_id = bot.execute_buy(
-            symbol=data['symbol'].replace("-", "/"),  # Ajusta formato (BTC-EUR → BTC/EUR)
-            trailing_percent=trailing_percent
-        )
+        try:
+            trailing_percent = float(data.get('trailing_stop_percent', 0.02))
+            position_id = bot.execute_buy(
+                symbol=data['symbol'],  # Ej: "BTCEUR"
+                trailing_percent=trailing_percent
+            )
+            
+            if position_id:
+                Thread(target=bot.manage_trailing_stop, args=(position_id,)).start()
+                return jsonify({"status": "success", "position_id": position_id})
         
-        if position_id:
-            Thread(target=bot.manage_trailing_stop, args=(position_id,)).start()
-            return jsonify({"status": "success", "position_id": position_id})
+        except ValueError as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
     
     return jsonify({"status": "ignored"})
 
@@ -224,9 +239,9 @@ if __name__ == '__main__':
     print("""
     ==============================
     🚀 Bot activo (Kraken)
+    - Formato de símbolo: BTCEUR
     - Endpoint: /webhook
     - Capital inicial: 40.00€
-    - DB: PostgreSQL
     ==============================
     """)
     run_server()
