@@ -1,200 +1,247 @@
 import os
 import time
-import psycopg2
+import threading
+import json
 import logging
-from threading import Thread, Lock
-from typing import Dict, Optional
+import psutil
+import atexit
+from threading import Thread, Lock, Event
+from typing import Dict, Optional, Tuple, Any, List
+from decimal import Decimal, getcontext
+import psycopg2
+import ccxt
 from ccxt import kraken
 from flask import jsonify
 from .config import config
 from .exchange import ExchangeClient
 
+# Configuración de precisión decimal
+getcontext().prec = 8
+
 class TradingBot:
-    """
-    Production-grade trading bot with:
-    - Thread-safe position management
-    - Automatic trailing stops
-    - Database persistence
-    - Comprehensive error handling
+    """ 
+    Trading Bot profesional con gestión avanzada de:
+    - Posiciones y órdenes
+    - Risk management
+    - Performance tracking
+    - Sistema de auto-recuperación
     """
 
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
+        # Configuración inicial
+        self.logger = self._setup_logging()
         self.exchange = ExchangeClient()
+        self._shutdown_event = Event()
+        self.lock = Lock()  # Para operaciones de trading
+        self.db_lock = Lock()  # Para operaciones DB
+        self.trailing_percent = Decimal('0.02')  # 2% trailing stop
+
+        # Estado inicial
         self._init_db()
         self._reset_state()
-        self.lock = Lock()  # Thread safety for shared state
+        self._start_background_services()
 
-    def _reset_state(self):
-        """Initialize all runtime tracking variables"""
+    # === CORE TRADING METHODS ===
+    def execute_buy(self, symbol: str, amount: Decimal, price: Decimal) -> Tuple[bool, str]:
+        """Ejecuta compra con gestión avanzada de errores"""
         with self.lock:
-            self.active_position = False
-            self.current_symbol = None
-            self.position_id = None
-            self.entry_price = 0.0
-            self.trailing_percent = 0.0
-            self.stop_price = 0.0
-
-    def _init_db(self):
-        """Initialize PostgreSQL connection"""
-        max_retries = 3
-        for attempt in range(max_retries):
             try:
-                self.conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-                self._create_tables()
-                return
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    self.logger.critical(f"DB connection failed after {max_retries} attempts")
-                    raise
-                time.sleep(2 ** attempt)
-                self.logger.warning(f"DB connection retry {attempt + 1}: {str(e)}")
+                # Validaciones iniciales
+                if self.active_position:
+                    return False, "Posición ya abierta"
+                
+                if not self._check_exchange_connectivity():
+                    return False, "Exchange no disponible"
 
-    def _create_tables(self):
-        """Ensure required tables exist"""
-        with self.conn.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS positions (
-                    id SERIAL PRIMARY KEY,
-                    symbol VARCHAR(10) NOT NULL,
-                    entry_price DECIMAL(16,8) NOT NULL,
-                    stop_price DECIMAL(16,8) NOT NULL,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            self.conn.commit()
-
-    def execute_buy(self, symbol: str, trailing_percent: float) -> bool:
-        """Execute buy order with production safeguards"""
-        with self.lock:
-            if self.active_position:
-                self.logger.warning(f"Ignoring buy - position already open for {self.current_symbol}")
-                return False
-
-            try:
-                # Calculate order parameters
-                ticker = self.exchange.get_ticker(symbol)
-                limit_price = round(ticker['ask'] * 1.01, 2)  # Price +1%
-                amount = round(config.INITIAL_CAPITAL / limit_price, 8)
-
-                # Place order
+                # Ejecución de orden
                 order = self.exchange.create_order({
                     'symbol': symbol,
                     'type': 'limit',
                     'side': 'buy',
-                    'amount': amount,
-                    'price': limit_price
-                })
+                    'amount': float(amount.quantize(Decimal('0.00000001'))),
+                    'price': float(price.quantize(Decimal('0.00000001')))
+                
+                # Actualizar estado
+                self._update_position(
+                    symbol=symbol,
+                    entry_price=price,
+                    stop_price=price * (Decimal('1') - self.trailing_percent),
+                    is_open=True
+                )
+                
+                # Iniciar trailing stop
+                Thread(
+                    target=self._manage_trailing_stop,
+                    daemon=True,
+                    name=f"TrailingStop-{symbol}"
+                ).start()
 
-                # Update state
-                self.active_position = True
-                self.current_symbol = symbol
-                self.entry_price = limit_price
-                self.trailing_percent = trailing_percent
-                self.stop_price = limit_price * (1 - trailing_percent)
+                return True, f"Orden ejecutada: {order['id']}"
 
-                # Persist position
-                with self.conn.cursor() as cursor:
-                    cursor.execute("""
-                        INSERT INTO positions (symbol, entry_price, stop_price)
-                        VALUES (%s, %s, %s)
-                        RETURNING id
-                    """, (symbol, limit_price, self.stop_price))
-                    self.position_id = cursor.fetchone()[0]
-                    self.conn.commit()
+            except ccxt.NetworkError as e:
+                self.logger.error(f"Network error: {str(e)}")
+                return False, "Error de conexión"
+            except ccxt.ExchangeError as e:
+                self.logger.error(f"Exchange error: {str(e)}")
+                return False, "Error en el exchange"
+            except Exception as e:
+                self.logger.critical(f"Critical error: {str(e)}", exc_info=True)
+                self._emergency_shutdown()
+                return False, "Error crítico"
 
-                self.logger.info(f"Bought {amount} {symbol} @ {limit_price}€")
-                return True
+    def _execute_sell(self) -> None:
+        """Venta con sistema de fallback robusto"""
+        with self.lock:
+            try:
+                amount = self._get_position_amount()
+                if amount <= Decimal('0'):
+                    raise ValueError("Cantidad inválida")
+
+                # 1. Intento con orden limitada
+                try:
+                    order = self.exchange.create_order({
+                        'symbol': self.current_symbol,
+                        'type': 'limit',
+                        'side': 'sell',
+                        'amount': float(amount.quantize(Decimal('0.00000001'))),
+                        'price': float(self.stop_price.quantize(Decimal('0.00000001')))
+                    })
+                except Exception:
+                    # 2. Fallback a mercado
+                    order = self.exchange.create_order({
+                        'symbol': self.current_symbol,
+                        'type': 'market',
+                        'side': 'sell',
+                        'amount': float(amount.quantize(Decimal('0.00000001')))
+                    })
+
+                # Actualizar estado
+                self._update_position(None, None, None, False)
+                self._reset_state()
 
             except Exception as e:
-                self.logger.error(f"Buy failed: {str(e)}")
-                self._reset_state()
-                return False
+                self.logger.critical(f"Fallo en venta: {str(e)}")
+                self._emergency_shutdown()
+                raise
 
-    def manage_trailing_stop(self):
-        """Active trailing stop management thread"""
-        self.logger.info(f"Starting trailing stop for {self.current_symbol}")
+    # === RISK MANAGEMENT ===
+    def _manage_trailing_stop(self) -> None:
+        """Trailing stop dinámico con backoff exponencial"""
+        retry_delay = 5  # Segundos iniciales
         
-        while self.active_position:
+        while not self._shutdown_event.is_set():
             try:
                 with self.lock:
+                    if not self.active_position:
+                        break
+
                     ticker = self.exchange.get_ticker(self.current_symbol)
-                    current_price = ticker['bid']
+                    current_price = Decimal(str(ticker['bid']))
                     
-                    # Update stop price if gaining
-                    new_stop = current_price * (1 - self.trailing_percent)
+                    # Actualizar stop
+                    new_stop = current_price * (Decimal('1') - self.trailing_percent)
                     if new_stop > self.stop_price:
                         self.stop_price = new_stop
                         self._update_stop_price()
                     
-                    # Check if stop triggered
+                    # Verificar stop
                     if current_price <= self.stop_price:
                         self._execute_sell()
                         break
-                    
-                time.sleep(60)  # Check every minute
-                
-            except Exception as e:
-                self.logger.error(f"Trailing stop error: {str(e)}")
-                time.sleep(300)  # Wait 5 minutes on errors
 
-    def _execute_sell(self):
-        """Execute sell order and clean up position"""
-        with self.lock:
+                retry_delay = 5  # Reset on success
+                time.sleep(retry_delay)
+
+            except Exception as e:
+                retry_delay = min(retry_delay * 2, 300)  # Max 5 min
+                self.logger.error(f"Trailing stop error (retry in {retry_delay}s): {str(e)}")
+                time.sleep(retry_delay)
+
+    # === DATABASE METHODS ===
+    def _init_db(self) -> None:
+        """Inicialización segura de conexión a DB"""
+        try:
+            self.conn = psycopg2.connect(
+                config.DATABASE_URL,
+                connect_timeout=5,
+                keepalives=1,
+                keepalives_idle=30
+            )
+            self._create_tables()
+        except Exception as e:
+            self.logger.critical(f"DB connection failed: {str(e)}")
+            raise
+
+    def _update_position(self, symbol: Optional[str], 
+                        entry_price: Optional[Decimal],
+                        stop_price: Optional[Decimal],
+                        is_open: bool) -> None:
+        """Actualización atómica de posición"""
+        with self.db_lock:
             try:
-                ticker = self.exchange.get_ticker(self.current_symbol)
-                sell_price = round(ticker['bid'] * 0.99, 2)  # Price -1%
-                
-                order = self.exchange.create_order({
-                    'symbol': self.current_symbol,
-                    'type': 'limit',
-                    'side': 'sell',
-                    'amount': self._get_position_amount(),
-                    'price': sell_price
-                })
-                
-                self.logger.info(f"Sold {self.current_symbol} @ {sell_price}€")
-                self._close_position()
-                
+                with self.conn.cursor() as cursor:
+                    if is_open:
+                        cursor.execute("""
+                            INSERT INTO positions 
+                            (symbol, entry_price, stop_price) 
+                            VALUES (%s, %s, %s)
+                            RETURNING id
+                        """, (
+                            symbol,
+                            float(entry_price) if entry_price else None,
+                            float(stop_price) if stop_price else None
+                        ))
+                        self.position_id = cursor.fetchone()[0]
+                    else:
+                        pnl = self._calculate_pnl()
+                        cursor.execute("""
+                            UPDATE positions 
+                            SET closed_at = NOW(), 
+                                pnl = %s 
+                            WHERE id = %s
+                        """, (float(pnl), self.position_id))
+                    self.conn.commit()
             except Exception as e:
-                self.logger.critical(f"Sell failed: {str(e)}")
-                # Emergency market sell attempt
-                try:
-                    self.exchange.create_order({
-                        'symbol': self.current_symbol,
-                        'type': 'market',
-                        'side': 'sell',
-                        'amount': self._get_position_amount()
-                    })
-                except Exception as emergency_error:
-                    self.logger.error(f"Emergency sell failed: {str(emergency_error)}")
-                finally:
-                    self._close_position()
+                self.conn.rollback()
+                raise
 
-    def _get_position_amount(self) -> float:
-        """Calculate current position amount"""
-        balance = self.exchange.get_balance()
-        return balance['free'].get(self.current_symbol.split('/')[0], 0)
+    # === UTILITIES ===
+    def _calculate_pnl(self) -> Decimal:
+        """Cálculo preciso de PnL"""
+        with self.lock:
+            if not self.active_position:
+                return Decimal('0')
+                
+            ticker = self.exchange.get_ticker(self.current_symbol)
+            current_price = Decimal(str(ticker['bid']))
+            return (current_price - self.entry_price) * self.position_size
 
-    def _update_stop_price(self):
-        """Persist updated stop price"""
-        with self.conn.cursor() as cursor:
-            cursor.execute("""
-                UPDATE positions SET stop_price = %s
-                WHERE id = %s
-            """, (self.stop_price, self.position_id))
-            self.conn.commit()
+    def _get_position_amount(self) -> Decimal:
+        """Cantidad disponible con precisión decimal"""
+        with self.lock:
+            balance = self.exchange.fetch_balance()
+            currency = self.current_symbol.split('/')[0]
+            return Decimal(str(balance['free'].get(currency, 0))).quantize(Decimal('0.00000001'))
 
-    def _close_position(self):
-        """Clean up after position closure"""
-        with self.conn.cursor() as cursor:
-            cursor.execute("""
-                UPDATE positions SET closed_at = NOW()
-                WHERE id = %s
-            """, (self.position_id,))
-            self.conn.commit()
-        self._reset_state()
+    # === SYSTEM MANAGEMENT ===
+    def shutdown(self) -> None:
+        """Apagado seguro del bot"""
+        self._shutdown_event.set()
+        self._save_state()
+        self.conn.close()
+        self.logger.info("Bot apagado correctamente")
 
+    def _emergency_shutdown(self) -> None:
+        """Protocolo de emergencia"""
+        self.logger.critical("INICIANDO APAGADO DE EMERGENCIA")
+        try:
+            if self.active_position:
+                self._execute_sell()
+        except Exception:
+            pass
+        finally:
+            self.shutdown()
 
-# Singleton instance for shared bot
+# Instancia global con manejo seguro
 bot_instance = TradingBot()
+atexit.register(bot_instance.shutdown)
