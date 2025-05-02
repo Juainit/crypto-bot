@@ -95,7 +95,7 @@ class TradingBot:
 
     def _validate_symbol(self, symbol: str) -> bool:
         """Valida el formato del símbolo"""
-        return (isinstance(symbol, str) and '/' in symbol and len(symbol.split('/')) == 2
+        return (isinstance(symbol, str) and '/' in symbol and len(symbol.split('/')) == 2)
 
     def _safe_get_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Obtiene ticker con manejo de errores"""
