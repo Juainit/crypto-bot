@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import atexit
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, Any
 from ccxt import kraken
 from functools import wraps
 
@@ -14,49 +14,54 @@ app = Flask(__name__)
 # ======================
 # DECORADOR SYNCHRONIZED
 # ======================
-def synchronized(lock):
-    """Decorador para sincronización thread-safe"""
-    def wrapper(func):
+def synchronized(lock_name: str):
+    """Decorador thread-safe que obtiene el lock por nombre"""
+    def decorator(func):
         @wraps(func)
-        def inner(self, *args, **kwargs):
+        def wrapper(self, *args, **kwargs):
+            lock = getattr(self, lock_name)
             with lock:
                 return func(self, *args, **kwargs)
-        return inner
-    return wrapper
+        return wrapper
+    return decorator
 
 # ===================
 # CLASE TRADING BOT
 # ===================
 class TradingBot:
     def __init__(self):
-        """Inicialización con todas las dependencias correctamente definidas"""
+        """Inicialización completa del bot"""
         # 1. Primero inicializamos el Lock
-        self.lock = Lock()  # <-- Definido ANTES de cualquier decorador
+        self._lock = Lock()  # Atributo interno con underscore
         
-        # 2. Configuración del estado
+        # 2. Estado del trading
         self.active_position = False
         self.current_symbol = None
         self.stop_price = None
         self.entry_price = None
         self.position_size = Decimal('0')
+        self._shutdown_event = Event()
         
-        # 3. Configuración del Exchange
+        # 3. Configuración del exchange Kraken
         self.exchange = kraken({
             'apiKey': os.getenv('KRAKEN_API_KEY'),
             'secret': os.getenv('KRAKEN_SECRET'),
             'enableRateLimit': True,
-            'timeout': 30000,
-            'rateLimit': 3000
+            'timeout': 30000,  # 30 segundos
+            'rateLimit': 3000   # Límite de llamadas
         })
         
-        # 4. Configuración de precisión decimal
+        # 4. Precisión decimal
         getcontext().prec = 8
         
         # 5. Configuración de logging
         self.logger = self._setup_logger()
+        
+        # 6. Cargar mercados al iniciar
+        self._load_markets()
 
     def _setup_logger(self):
-        """Configura logger profesional con handlers múltiples"""
+        """Configura logging profesional"""
         logger = logging.getLogger('TradingBot')
         logger.setLevel(logging.INFO)
         
@@ -76,10 +81,20 @@ class TradingBot:
         logger.addHandler(fh)
         return logger
 
-    @synchronized(lock)  # <-- Usando el decorador con el lock ya definido
-    def execute_buy(self, symbol: str, trailing_percent: float) -> Tuple[bool, str]:
-        """Ejecuta orden de compra con validación completa"""
+    def _load_markets(self):
+        """Carga los mercados disponibles"""
         try:
+            self.exchange.load_markets()
+            self.logger.info("Mercados cargados correctamente")
+        except Exception as e:
+            self.logger.error(f"Error cargando mercados: {str(e)}")
+            raise
+
+    @synchronized('_lock')
+    def execute_buy(self, symbol: str, trailing_percent: float) -> Tuple[bool, str]:
+        """Ejecuta orden de compra con validación mejorada"""
+        try:
+            # Validación de posición existente
             if self.active_position:
                 msg = f"Posición activa en {self.current_symbol}"
                 self.logger.warning(msg)
@@ -87,9 +102,9 @@ class TradingBot:
 
             # Validación de símbolo
             if not self._validate_symbol(symbol):
-                return False, "Símbolo inválido (formato: BTC/EUR)"
+                return False, "Formato de símbolo inválido (ej: BTC/EUR)"
 
-            # Obtener ticker con manejo de errores
+            # Obtener ticker
             ticker = self._safe_get_ticker(symbol)
             if not ticker:
                 return False, "Error obteniendo datos del mercado"
@@ -97,13 +112,13 @@ class TradingBot:
             current_price = Decimal(str(ticker['ask']))
             amount = (Decimal('40') / current_price).quantize(Decimal('0.00000001'))
             
-            # Validación de cantidad mínima
+            # Validar cantidad mínima
             min_amount = self._get_min_order_size(symbol)
             if amount < min_amount:
                 msg = f"Cantidad {amount} menor al mínimo {min_amount}"
                 return False, msg
 
-            # Ejecutar orden con validación
+            # Ejecutar orden
             order = self.exchange.create_order(
                 symbol=symbol,
                 type='limit',
@@ -136,7 +151,7 @@ class TradingBot:
             self.logger.error(f"Error en compra: {str(e)}", exc_info=True)
             return False, f"Error interno: {str(e)}"
 
-    @synchronized(lock)
+    @synchronized('_lock')
     def execute_sell(self) -> bool:
         """Ejecuta venta con fallback a mercado"""
         try:
@@ -144,6 +159,7 @@ class TradingBot:
                 self.logger.warning("No hay posición activa para vender")
                 return False
 
+            # Obtener balance
             balance = self.exchange.fetch_balance()
             currency = self.current_symbol.split('/')[0]
             amount = Decimal(str(balance['free'][currency])).quantize(Decimal('0.00000001'))
@@ -181,25 +197,37 @@ class TradingBot:
 
     def manage_trailing_stop(self):
         """Gestión activa del trailing stop"""
-        while self.active_position and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set() and self.active_position:
             try:
-                with self.lock:  # Usamos el lock directamente aquí
+                # Usamos bloque with para el lock
+                with self._lock:
+                    if not self.active_position:
+                        break
+
                     ticker = self.exchange.fetch_ticker(self.current_symbol)
                     current_price = Decimal(str(ticker['bid']))
                     
-                    new_stop = current_price * (1 - Decimal('0.02'))
+                    # Actualizar stop
+                    new_stop = current_price * (1 - Decimal('0.02'))  # 2% trailing
                     if new_stop > self.stop_price:
                         self.stop_price = new_stop
-                        self.logger.debug(f"Actualizado stop a {self.stop_price:.8f}")
+                        self.logger.debug(f"Stop actualizado: {self.stop_price:.8f}")
                     
+                    # Verificar activación
                     if current_price <= self.stop_price:
                         self.execute_sell()
                         break
 
-                time.sleep(60)
+                time.sleep(60)  # Verificar cada minuto
+
             except Exception as e:
                 self.logger.error(f"Error en trailing stop: {str(e)}")
-                time.sleep(300)
+                time.sleep(300)  # Esperar 5 minutos ante errores
+
+    def shutdown(self):
+        """Apagado seguro del bot"""
+        self._shutdown_event.set()
+        self.logger.info("Bot apagado correctamente")
 
     def _validate_symbol(self, symbol: str) -> bool:
         """Valida formato del símbolo"""
@@ -207,8 +235,8 @@ class TradingBot:
                 '/' in symbol and 
                 len(symbol.split('/')) == 2)
 
-    def _safe_get_ticker(self, symbol: str) -> Optional[Dict]:
-        """Obtiene ticker con manejo robusto de errores"""
+    def _safe_get_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Obtiene ticker con manejo de errores"""
         try:
             return self.exchange.fetch_ticker(symbol)
         except Exception as e:
@@ -216,16 +244,16 @@ class TradingBot:
             return None
 
     def _get_min_order_size(self, symbol: str) -> Decimal:
-        """Obtiene el tamaño mínimo de orden para el par"""
+        """Obtiene tamaño mínimo de orden para el par"""
         try:
-            markets = self.exchange.load_markets()
-            return Decimal(str(markets[symbol]['limits']['amount']['min']))
+            market = self.exchange.market(symbol)
+            return Decimal(str(market['limits']['amount']['min']))
         except Exception as e:
-            self.logger.warning(f"Usando valor mínimo por defecto: {str(e)}")
-            return Decimal('0.00000001')
+            self.logger.warning(f"Usando mínimo por defecto: {str(e)}")
+            return Decimal('0.00000001')  # Valor por defecto seguro
 
 # ======================
-# CONFIGURACIÓN FLASK
+# CONFIGURACIÓN WEBHOOK
 # ======================
 def validate_webhook(f):
     """Decorador para validación de webhooks"""
@@ -234,18 +262,18 @@ def validate_webhook(f):
         data = request.get_json()
         
         if not data:
-            return jsonify({"status": "error", "message": "No data"}), 400
+            return jsonify({"status": "error", "message": "No data provided"}), 400
             
         required = ['action', 'symbol', 'trailing_stop']
         if not all(k in data for k in required):
-            return jsonify({"status": "error", "message": "Missing fields"}), 400
+            return jsonify({"status": "error", "message": "Missing required fields"}), 400
             
         try:
             trailing = float(data['trailing_stop'])
             if not (0 < trailing < 1):
                 raise ValueError
         except:
-            return jsonify({"status": "error", "message": "Invalid trailing"}), 400
+            return jsonify({"status": "error", "message": "Invalid trailing stop (0-1)"}), 400
             
         return f(*args, **kwargs)
     return wrapper
@@ -253,7 +281,7 @@ def validate_webhook(f):
 @app.route('/webhook', methods=['POST'])
 @validate_webhook
 def handle_webhook():
-    """Endpoint para señales de trading"""
+    """Endpoint principal para señales de trading"""
     try:
         data = request.get_json()
         symbol = data['symbol'].upper().replace('-', '/')
@@ -262,6 +290,7 @@ def handle_webhook():
             success, msg = bot.execute_buy(symbol, float(data['trailing_stop']))
             
             if success:
+                # Iniciar trailing stop en thread separado
                 Thread(
                     target=bot.manage_trailing_stop,
                     daemon=True,
@@ -271,16 +300,17 @@ def handle_webhook():
                 return jsonify({
                     "status": "success",
                     "order_id": msg,
-                    "symbol": symbol
+                    "symbol": symbol,
+                    "trailing_stop": data['trailing_stop']
                 }), 200
                 
             return jsonify({"status": "error", "message": msg}), 400
             
-        return jsonify({"status": "ignored"}), 400
+        return jsonify({"status": "ignored", "message": "Invalid action"}), 400
 
     except Exception as e:
         app.logger.error(f"Webhook error: {str(e)}", exc_info=True)
-        return jsonify({"status": "error", "message": "Internal error"}), 500
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 # ======================
 # INICIALIZACIÓN
@@ -298,14 +328,17 @@ def run_server():
         channel_timeout=60
     )
 
+# Instancia global del bot
+bot = TradingBot()
+
+# Manejo de shutdown
+atexit.register(bot.shutdown)
+
 if __name__ == '__main__':
-    bot = TradingBot()
-    
     print("""
     ====================================
     🚀 CRYPTO TRADING BOT - PRODUCTION
     ====================================
-    Versión: 2.1.1
     Exchange: Kraken
     Timeout: 30 segundos
     Endpoint: POST /webhook
