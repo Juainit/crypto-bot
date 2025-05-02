@@ -60,6 +60,7 @@ class TradingBot:
                     'side': 'buy',
                     'amount': float(amount.quantize(Decimal('0.00000001'))),
                     'price': float(price.quantize(Decimal('0.00000001')))
+                })  # <-- Correctamente cerrado
                 
                 # Actualizar estado
                 self._update_position(
@@ -105,17 +106,24 @@ class TradingBot:
                         'side': 'sell',
                         'amount': float(amount.quantize(Decimal('0.00000001'))),
                         'price': float(self.stop_price.quantize(Decimal('0.00000001')))
-                    })
-                except Exception:
+                    })  # <-- Correctamente cerrado
+                    
+                    self.logger.info(f"Venta limitada ejecutada: {order}")
+                
+                except Exception as limit_error:
+                    self.logger.error(f"Error en venta limitada: {str(limit_error)}")
+                    
                     # 2. Fallback a mercado
                     order = self.exchange.create_order({
                         'symbol': self.current_symbol,
                         'type': 'market',
                         'side': 'sell',
                         'amount': float(amount.quantize(Decimal('0.00000001')))
-                    })
+                    })  # <-- Correctamente cerrado
+                    
+                    self.logger.warning(f"Venta de mercado ejecutada: {order}")
 
-                # Actualizar estado
+                # 3. Actualizar estado
                 self._update_position(None, None, None, False)
                 self._reset_state()
 
@@ -241,6 +249,54 @@ class TradingBot:
             pass
         finally:
             self.shutdown()
+
+    def _setup_logging(self) -> logging.Logger:
+        """Configura logging profesional"""
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        
+        # Handler para consola
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+        
+        # Handler para archivo
+        fh = logging.FileHandler('trading_bot.log')
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        
+        return logger
+
+    def _start_background_services(self) -> None:
+        """Inicia servicios en segundo plano"""
+        Thread(target=self._health_monitor, daemon=True).start()
+        Thread(target=self._performance_tracker, daemon=True).start()
+
+    def _health_monitor(self) -> None:
+        """Monitoreo continuo del sistema"""
+        while not self._shutdown_event.is_set():
+            try:
+                health = self._check_system_health()
+                if not all(health.values()):
+                    self.logger.warning(f"Health check failed: {health}")
+                time.sleep(60)
+            except Exception as e:
+                self.logger.error(f"Health monitor error: {str(e)}")
+                time.sleep(300)
+
+    def _performance_tracker(self) -> None:
+        """Registro periódico de métricas"""
+        while not self._shutdown_event.is_set():
+            try:
+                self._log_performance_metrics()
+                time.sleep(300)
+            except Exception as e:
+                self.logger.error(f"Performance tracker error: {str(e)}")
+               .sleep(600)
 
 # Instancia global con manejo seguro
 bot_instance = TradingBot()
