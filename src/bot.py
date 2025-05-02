@@ -1,16 +1,14 @@
 import os
 import time
-import threading
 import json
 import logging
+import threading
 import psutil
-import atexit
-from threading import Thread, Lock, Event
-from typing import Dict, Optional, Tuple, Any, List
-from decimal import Decimal, getcontext
 import psycopg2
-import ccxt
-from ccxt import kraken
+from threading import Thread, Lock, Event
+from typing import Dict, Optional, Tuple, Any
+from decimal import Decimal, getcontext
+from ccxt import ExchangeError, NetworkError
 from flask import jsonify
 from .config import config
 from .exchange import ExchangeClient
@@ -19,85 +17,183 @@ from .exchange import ExchangeClient
 getcontext().prec = 8
 
 class TradingBot:
-    """ 
-    Trading Bot profesional con gestión avanzada de:
-    - Posiciones y órdenes
-    - Risk management
-    - Performance tracking
-    - Sistema de auto-recuperación
     """
-
+    Trading Bot profesional con:
+    - Gestión de posiciones atómica
+    - Mecanismos de emergencia
+    - Monitoreo de rendimiento mejorado
+    - Sistema completo de health checks
+    """
+    
     def __init__(self):
-        # Configuración inicial
-        self.logger = self._setup_logging()
+        self.logger = logging.getLogger(__name__)
         self.exchange = ExchangeClient()
         self._shutdown_event = Event()
-        self.lock = Lock()  # Para operaciones de trading
+        
+        # Locks para concurrencia
+        self.lock = Lock()  # Para estado principal
         self.db_lock = Lock()  # Para operaciones DB
-        self.trailing_percent = Decimal('0.02')  # 2% trailing stop
-
+        
         # Estado inicial
-        self._init_db()
         self._reset_state()
-        self._start_background_services()
+        self._init_db()
+        
+        # Sistemas de monitoreo
+        self._start_health_monitor()
+        self._start_performance_tracker()
 
-    # === CORE TRADING METHODS ===
-    def execute_buy(self, symbol: str, amount: Decimal, price: Decimal) -> Tuple[bool, str]:
-        """Ejecuta compra con gestión avanzada de errores"""
+    def _reset_state(self) -> None:
+        """Inicialización segura del estado"""
         with self.lock:
-            try:
-                # Validaciones iniciales
-                if self.active_position:
-                    return False, "Posición ya abierta"
-                
-                if not self._check_exchange_connectivity():
-                    return False, "Exchange no disponible"
+            self.active_position = False
+            self.current_symbol = None
+            self.position_id = None
+            self.entry_price = Decimal('0')
+            self.stop_price = Decimal('0')
+            self.position_size = Decimal('0')
+            self.last_update = time.time()
 
-                # Ejecución de orden
+    def _init_db(self, max_retries: int = 5) -> None:
+        """Conexión robusta a PostgreSQL con reintentos"""
+        for attempt in range(max_retries):
+            try:
+                with self.db_lock:
+                    self.conn = psycopg2.connect(
+                        config.DATABASE_URL,
+                        connect_timeout=5,
+                        keepalives=1,
+                        keepalives_idle=30
+                    )
+                    self._create_tables()
+                    self.logger.info("Conexión a DB establecida")
+                    return
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    self.logger.critical("Fallo en conexión a DB")
+                    raise
+                backoff = min(2 ** attempt, 30)
+                time.sleep(backoff)
+                self.logger.warning(f"Reintento DB {attempt + 1}/{max_retries}")
+
+    def _create_tables(self) -> None:
+        """Inicialización segura de tablas"""
+        with self.db_lock, self.conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(10) NOT NULL,
+                    entry_price DECIMAL(16,8) NOT NULL,
+                    stop_price DECIMAL(16,8) NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    closed_at TIMESTAMPTZ,
+                    pnl DECIMAL(16,8)
+                );
+                CREATE TABLE IF NOT EXISTS performance_metrics (
+                    timestamp TIMESTAMPTZ PRIMARY KEY,
+                    data JSONB NOT NULL
+                );
+            """)
+            self.conn.commit()
+
+    # ======================
+    # OPERACIONES DE TRADING
+    # ======================
+    
+    def execute_buy(self, symbol: str, trailing_percent: float) -> Tuple[bool, str]:
+        """
+        Ejecuta compra con validación completa
+        """
+        with self.lock:
+            if self.active_position:
+                msg = f"Posición activa en {self.current_symbol}"
+                self.logger.warning(msg)
+                return False, msg
+                
+            try:
+                # Validación de mercado
+                ticker = self.exchange.get_ticker(symbol)
+                if not ticker or 'ask' not in ticker:
+                    return False, "Datos de mercado inválidos"
+                
+                # Cálculos precisos
+                limit_price = Decimal(str(ticker['ask'])) * Decimal('1.01')
+                amount = Decimal(config.INITIAL_CAPITAL) / limit_price
+                
+                # Ejecución orden
                 order = self.exchange.create_order({
                     'symbol': symbol,
                     'type': 'limit',
                     'side': 'buy',
                     'amount': float(amount.quantize(Decimal('0.00000001'))),
-                    'price': float(price.quantize(Decimal('0.00000001')))
-                })  # <-- Correctamente cerrado
+                    'price': float(limit_price.quantize(Decimal('0.01')))
+                })
                 
-                # Actualizar estado
-                self._update_position(
-                    symbol=symbol,
-                    entry_price=price,
-                    stop_price=price * (Decimal('1') - self.trailing_percent),
-                    is_open=True
-                )
+                # Actualización de estado
+                stop_price = limit_price * (1 - Decimal(str(trailing_percent)))
+                self._update_position(symbol, limit_price, stop_price, True)
                 
-                # Iniciar trailing stop
+                # Inicio de trailing stop
                 Thread(
                     target=self._manage_trailing_stop,
                     daemon=True,
                     name=f"TrailingStop-{symbol}"
                 ).start()
-
-                return True, f"Orden ejecutada: {order['id']}"
-
-            except ccxt.NetworkError as e:
-                self.logger.error(f"Network error: {str(e)}")
+                
+                msg = f"Compra: {amount:.8f} {symbol} @ {limit_price:.2f}€"
+                self.logger.info(msg)
+                return True, msg
+                
+            except NetworkError as e:
+                self.logger.error(f"Error de red: {str(e)}")
                 return False, "Error de conexión"
-            except ccxt.ExchangeError as e:
-                self.logger.error(f"Exchange error: {str(e)}")
-                return False, "Error en el exchange"
+            except ExchangeError as e:
+                self.logger.error(f"Error exchange: {str(e)}")
+                return False, "Error en operación"
             except Exception as e:
-                self.logger.critical(f"Critical error: {str(e)}", exc_info=True)
-                self._emergency_shutdown()
-                return False, "Error crítico"
+                self.logger.error(f"Error inesperado: {str(e)}", exc_info=True)
+                self._reset_state()
+                return False, f"Error: {str(e)}"
+
+    def _manage_trailing_stop(self) -> None:
+        """Gestión activa del trailing stop"""
+        retry_delay = 60  # Segundos iniciales
+        
+        while not self._shutdown_event.is_set():
+            try:
+                with self.lock:
+                    if not self.active_position:
+                        break
+                        
+                    ticker = self.exchange.get_ticker(self.current_symbol)
+                    current_price = Decimal(str(ticker['bid']))
+                    
+                    # Actualización dinámica
+                    new_stop = current_price * (1 - self.trailing_percent)
+                    if new_stop > self.stop_price:
+                        self.stop_price = new_stop
+                        self._update_stop_price()
+                    
+                    # Verificación de activación
+                    if current_price <= self.stop_price:
+                        self._execute_sell()
+                        break
+                
+                retry_delay = 60  # Resetear delay
+                time.sleep(retry_delay)
+                
+            except Exception as e:
+                self.logger.error(f"Error trailing stop: {str(e)}")
+                retry_delay = min(retry_delay * 2, 300)  # Backoff exponencial
+                time.sleep(retry_delay)
 
     def _execute_sell(self) -> None:
-        """Venta con sistema de fallback robusto"""
+        """Ejecuta venta con fallback a mercado"""
         with self.lock:
             try:
                 amount = self._get_position_amount()
                 if amount <= Decimal('0'):
                     raise ValueError("Cantidad inválida")
-
+                
                 # 1. Intento con orden limitada
                 try:
                     order = self.exchange.create_order({
@@ -106,198 +202,200 @@ class TradingBot:
                         'side': 'sell',
                         'amount': float(amount.quantize(Decimal('0.00000001'))),
                         'price': float(self.stop_price.quantize(Decimal('0.00000001')))
-                    })  # <-- Correctamente cerrado
-                    
-                    self.logger.info(f"Venta limitada ejecutada: {order}")
-                
-                except Exception as limit_error:
-                    self.logger.error(f"Error en venta limitada: {str(limit_error)}")
-                    
+                    })
+                except Exception:
                     # 2. Fallback a mercado
                     order = self.exchange.create_order({
                         'symbol': self.current_symbol,
                         'type': 'market',
                         'side': 'sell',
                         'amount': float(amount.quantize(Decimal('0.00000001')))
-                    })  # <-- Correctamente cerrado
-                    
-                    self.logger.warning(f"Venta de mercado ejecutada: {order}")
-
-                # 3. Actualizar estado
+                    })
+                
+                # 3. Actualización consistente
+                pnl = self._calculate_pnl()
                 self._update_position(None, None, None, False)
+                self.logger.info(f"Venta ejecutada. PnL: {pnl:.2f}€")
+                
+            except Exception as e:
+                self.logger.critical(f"Error crítico en venta: {str(e)}")
+                raise
+            finally:
                 self._reset_state()
 
-            except Exception as e:
-                self.logger.critical(f"Fallo en venta: {str(e)}")
-                self._emergency_shutdown()
-                raise
-
-    # === RISK MANAGEMENT ===
-    def _manage_trailing_stop(self) -> None:
-        """Trailing stop dinámico con backoff exponencial"""
-        retry_delay = 5  # Segundos iniciales
+    # ======================
+    # MÉTODOS DE MONITOREO
+    # ======================
+    
+    def _start_health_monitor(self) -> None:
+        """Inicia hilo de monitoreo de salud"""
+        def monitor():
+            while not self._shutdown_event.is_set():
+                try:
+                    self._check_system_health()
+                    time.sleep(300)  # 5 minutos
+                except Exception as e:
+                    self.logger.error(f"Monitor falló: {str(e)}")
+                    time.sleep(600)
         
-        while not self._shutdown_event.is_set():
-            try:
-                with self.lock:
-                    if not self.active_position:
-                        break
+        Thread(target=monitor, daemon=True, name="HealthMonitor").start()
 
-                    ticker = self.exchange.get_ticker(self.current_symbol)
-                    current_price = Decimal(str(ticker['bid']))
-                    
-                    # Actualizar stop
-                    new_stop = current_price * (Decimal('1') - self.trailing_percent)
-                    if new_stop > self.stop_price:
-                        self.stop_price = new_stop
-                        self._update_stop_price()
-                    
-                    # Verificar stop
-                    if current_price <= self.stop_price:
-                        self._execute_sell()
-                        break
+    def _start_performance_tracker(self) -> None:
+        """Inicia hilo de métricas de rendimiento"""
+        def tracker():
+            while not self._shutdown_event.is_set():
+                try:
+                    self._log_performance_metrics()
+                    time.sleep(300)  # 5 minutos
+                except Exception as e:
+                    self.logger.error(f"Tracker falló: {str(e)}")
+                    time.sleep(600)
+        
+        Thread(target=tracker, daemon=True, name="PerformanceTracker").start()
 
-                retry_delay = 5  # Reset on success
-                time.sleep(retry_delay)
+    def _check_system_health(self) -> Dict[str, bool]:
+        """Verificación completa del sistema"""
+        return {
+            'database': not self.conn.closed,
+            'exchange': self._check_exchange_connectivity(),
+            'position': self._verify_position_state(),
+            'memory': psutil.virtual_memory().percent < 90,
+            'cpu': psutil.cpu_percent(interval=1) < 80
+        }
 
-            except Exception as e:
-                retry_delay = min(retry_delay * 2, 300)  # Max 5 min
-                self.logger.error(f"Trailing stop error (retry in {retry_delay}s): {str(e)}")
-                time.sleep(retry_delay)
+    def _log_performance_metrics(self) -> None:
+        """Registro de métricas clave"""
+        metrics = {
+            'timestamp': time.time(),
+            'positions': self._count_open_positions(),
+            'performance': float(self._calculate_pnl()),
+            'exchange_latency': self._measure_latency(),
+            'system': {
+                'memory': psutil.virtual_memory().percent,
+                'cpu': psutil.cpu_percent(interval=1)
+            }
+        }
+        self.logger.info(f"Métricas: {metrics}")
+        
+        # Persistencia en DB
+        with self.db_lock, self.conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO performance_metrics (timestamp, data)
+                VALUES (to_timestamp(%s), %s)
+                ON CONFLICT (timestamp) DO UPDATE
+                SET data = EXCLUDED.data
+            """, (metrics['timestamp'], json.dumps(metrics)))
+            self.conn.commit()
 
-    # === DATABASE METHODS ===
-    def _init_db(self) -> None:
-        """Inicialización segura de conexión a DB"""
+    # ======================
+    # MÉTODOS AUXILIARES
+    # ======================
+    
+    def _get_position_amount(self) -> Decimal:
+        """Obtiene cantidad disponible del activo"""
+        with self.lock:
+            if not self.active_position:
+                return Decimal('0')
+            balance = self.exchange.fetch_balance()
+            currency = self.current_symbol.split('/')[0]
+            return Decimal(str(balance['free'].get(currency, 0)))
+
+    def _calculate_pnl(self) -> Decimal:
+        """Calcula ganancias/pérdidas actuales"""
+        with self.lock:
+            if not self.active_position:
+                return Decimal('0')
+            ticker = self.exchange.get_ticker(self.current_symbol)
+            current_price = Decimal(str(ticker['bid']))
+            return (current_price - self.entry_price) * (Decimal(config.INITIAL_CAPITAL) / self.entry_price)
+
+    def _measure_latency(self) -> float:
+        """Mide latencia del exchange"""
+        start = time.time()
         try:
-            self.conn = psycopg2.connect(
-                config.DATABASE_URL,
-                connect_timeout=5,
-                keepalives=1,
-                keepalives_idle=30
-            )
-            self._create_tables()
-        except Exception as e:
-            self.logger.critical(f"DB connection failed: {str(e)}")
-            raise
+            self.exchange.fetch_time()
+            return (time.time() - start) * 1000  # ms
+        except Exception:
+            return -1
 
     def _update_position(self, symbol: Optional[str], 
-                        entry_price: Optional[Decimal],
-                        stop_price: Optional[Decimal],
+                        entry_price: Optional[Decimal], 
+                        stop_price: Optional[Decimal], 
                         is_open: bool) -> None:
         """Actualización atómica de posición"""
         with self.db_lock:
+            cursor = self.conn.cursor()
             try:
-                with self.conn.cursor() as cursor:
-                    if is_open:
-                        cursor.execute("""
-                            INSERT INTO positions 
-                            (symbol, entry_price, stop_price) 
-                            VALUES (%s, %s, %s)
-                            RETURNING id
-                        """, (
-                            symbol,
-                            float(entry_price) if entry_price else None,
-                            float(stop_price) if stop_price else None
-                        ))
-                        self.position_id = cursor.fetchone()[0]
-                    else:
-                        pnl = self._calculate_pnl()
-                        cursor.execute("""
-                            UPDATE positions 
-                            SET closed_at = NOW(), 
-                                pnl = %s 
-                            WHERE id = %s
-                        """, (float(pnl), self.position_id))
-                    self.conn.commit()
+                if is_open:
+                    cursor.execute("""
+                        INSERT INTO positions
+                        (symbol, entry_price, stop_price)
+                        VALUES (%s, %s, %s)
+                        RETURNING id
+                    """, (
+                        symbol,
+                        float(entry_price) if entry_price else None,
+                        float(stop_price) if stop_price else None
+                    ))
+                    self.position_id = cursor.fetchone()[0]
+                else:
+                    pnl = self._calculate_pnl()
+                    cursor.execute("""
+                        UPDATE positions
+                        SET closed_at = NOW(),
+                            pnl = %s
+                        WHERE id = %s
+                    """, (
+                        float(pnl) if pnl else None,
+                        self.position_id
+                    ))
+                self.conn.commit()
             except Exception as e:
                 self.conn.rollback()
                 raise
 
-    # === UTILITIES ===
-    def _calculate_pnl(self) -> Decimal:
-        """Cálculo preciso de PnL"""
-        with self.lock:
-            if not self.active_position:
-                return Decimal('0')
-                
-            ticker = self.exchange.get_ticker(self.current_symbol)
-            current_price = Decimal(str(ticker['bid']))
-            return (current_price - self.entry_price) * self.position_size
+    def _update_stop_price(self) -> None:
+        """Actualiza stop price en DB"""
+        with self.db_lock:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                UPDATE positions
+                SET stop_price = %s
+                WHERE id = %s
+            """, (float(self.stop_price), self.position_id))
+            self.conn.commit()
 
-    def _get_position_amount(self) -> Decimal:
-        """Cantidad disponible con precisión decimal"""
-        with self.lock:
-            balance = self.exchange.fetch_balance()
-            currency = self.current_symbol.split('/')[0]
-            return Decimal(str(balance['free'].get(currency, 0))).quantize(Decimal('0.00000001'))
+    def _verify_position_state(self) -> bool:
+        """Verifica consistencia estado-DB"""
+        with self.db_lock:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM positions
+                WHERE closed_at IS NULL
+            """)
+            return cursor.fetchone()[0] == (1 if self.active_position else 0)
 
-    # === SYSTEM MANAGEMENT ===
+    def _count_open_positions(self) -> int:
+        """Cuenta posiciones abiertas"""
+        with self.db_lock:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM positions
+                WHERE closed_at IS NULL
+            """)
+            return cursor.fetchone()[0]
+
     def shutdown(self) -> None:
-        """Apagado seguro del bot"""
+        """Apagado controlado"""
         self._shutdown_event.set()
-        self._save_state()
-        self.conn.close()
-        self.logger.info("Bot apagado correctamente")
-
-    def _emergency_shutdown(self) -> None:
-        """Protocolo de emergencia"""
-        self.logger.critical("INICIANDO APAGADO DE EMERGENCIA")
-        try:
+        with self.lock:
             if self.active_position:
                 self._execute_sell()
-        except Exception:
-            pass
-        finally:
-            self.shutdown()
+        with self.db_lock:
+            if hasattr(self, 'conn') and not self.conn.closed:
+                self.conn.close()
 
-    def _setup_logging(self) -> logging.Logger:
-        """Configura logging profesional"""
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.INFO)
-        
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        # Handler para consola
-        ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-        
-        # Handler para archivo
-        fh = logging.FileHandler('trading_bot.log')
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-        
-        return logger
-
-    def _start_background_services(self) -> None:
-        """Inicia servicios en segundo plano"""
-        Thread(target=self._health_monitor, daemon=True).start()
-        Thread(target=self._performance_tracker, daemon=True).start()
-
-    def _health_monitor(self) -> None:
-        """Monitoreo continuo del sistema"""
-        while not self._shutdown_event.is_set():
-            try:
-                health = self._check_system_health()
-                if not all(health.values()):
-                    self.logger.warning(f"Health check failed: {health}")
-                time.sleep(60)
-            except Exception as e:
-                self.logger.error(f"Health monitor error: {str(e)}")
-                time.sleep(300)
-
-    def _performance_tracker(self) -> None:
-        """Registro periódico de métricas"""
-        while not self._shutdown_event.is_set():
-            try:
-                self._log_performance_metrics()
-                time.sleep(300)
-            except Exception as e:
-                self.logger.error(f"Performance tracker error: {str(e)}")
-               .sleep(600)
-
-# Instancia global con manejo seguro
+# Instancia global con manejo de shutdown
 bot_instance = TradingBot()
+import atexit
 atexit.register(bot_instance.shutdown)
