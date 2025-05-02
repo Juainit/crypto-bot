@@ -10,27 +10,52 @@ class Config:
     - Type hints
     - Sensitive data protection
     - Runtime checks
+    - Debug output system
     """
     
     def __init__(self):
+        self.logger = logging.getLogger(__name__)
         self._load_environment()
+        self._debug_print_config()  # Debug output added here
         self._validate()
-
+    
     def _load_environment(self):
         """Load .env file with production safeguards"""
         try:
             if not load_dotenv():
-                logging.warning("No .env file found - using system environment")
+                self.logger.warning("No .env file found - using system environment")
         except Exception as e:
-            logging.critical(f"Environment loading failed: {str(e)}")
+            self.logger.critical(f"Environment loading failed: {str(e)}")
             raise
-
+    
+    def _debug_print_config(self):
+        """Log all critical configuration for verification"""
+        debug_vars = {
+            'KRAKEN_API_KEY': self.KRAKEN_API_KEY,
+            'KRAKEN_SECRET_LENGTH': len(self.KRAKEN_SECRET) if self.KRAKEN_SECRET else 0,
+            'WEB_SERVER_PORT': self.WEB_SERVER_PORT,
+            'INITIAL_CAPITAL': self.INITIAL_CAPITAL,
+            'FEE_RATE': self.FEE_RATE,
+            'MIN_ORDER_SIZE': self.MIN_ORDER_SIZE,
+            'ENVIRONMENT_LOADED': bool(self.KRAKEN_API_KEY)  # Basic check
+        }
+        
+        self.logger.debug("=== CONFIGURATION DEBUG OUTPUT ===")
+        for k, v in debug_vars.items():
+            if 'SECRET' in k:
+                self.logger.debug(f"{k}: {'*'*8} (redacted)")
+            elif 'API_KEY' in k:
+                self.logger.debug(f"{k}: {v[:4]}...{v[-4:] if len(v) > 8 else ''}")
+            else:
+                self.logger.debug(f"{k}: {v}")
+        self.logger.debug("================================")
+    
     def _validate(self):
         """Validate critical configuration"""
         if not all([self.KRAKEN_API_KEY, self.KRAKEN_SECRET]):
-            logging.critical("Missing Kraken API credentials")
+            self.logger.critical("Missing Kraken API credentials")
             raise EnvironmentError("Kraken API keys not configured")
-
+    
     @property
     def KRAKEN_API_KEY(self) -> str:
         """Securely access API key with validation"""
@@ -38,7 +63,7 @@ class Config:
         if not key or len(key) != 56:  # Kraken key length
             raise ValueError("Invalid Kraken API key format")
         return key
-
+    
     @property
     def KRAKEN_SECRET(self) -> str:
         """Securely access API secret"""
@@ -46,12 +71,12 @@ class Config:
         if not secret or len(secret) != 84:  # Kraken secret length
             raise ValueError("Invalid Kraken secret format")
         return secret
-
+    
     @property
     def WEB_SERVER_PORT(self) -> int:
         """Get port with fallback"""
         return int(os.getenv("PORT", "3000"))
-
+    
     @property
     def INITIAL_CAPITAL(self) -> float:
         """Validated trading capital"""
@@ -59,7 +84,7 @@ class Config:
         if capital < 10:  # Minimum order size
             raise ValueError("Capital must be ≥10€")
         return capital
-
+    
     @property
     def FEE_RATE(self) -> float:
         """Validated fee rate"""
@@ -67,12 +92,11 @@ class Config:
         if not 0 < rate < 0.01:  # Sanity check
             raise ValueError("Invalid fee rate")
         return rate
-
+    
     @property
     def MIN_ORDER_SIZE(self) -> float:
         """Exchange minimum order threshold"""
         return 10.0  # Kraken's minimum in EUR
-
 
 # Singleton instance for shared configuration
 config = Config()
