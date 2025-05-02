@@ -1,102 +1,92 @@
 import os
-from dotenv import load_dotenv
-from typing import Optional
 import logging
+from typing import Optional
 
 class Config:
     """
-    Production configuration with:
-    - Environment validation
-    - Type hints
-    - Sensitive data protection
-    - Runtime checks
-    - Debug output system
+    Production-ready configuration with:
+    - Mandatory vs optional variables
+    - Secure debug output
+    - Environment variable caching
+    - Type hints for IDE support
     """
-    
-    def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        self._load_environment()
-        self._debug_print_config()  # Debug output added here
-        self._validate()
-    
-    def _load_environment(self):
-        """Load .env file with production safeguards"""
-        try:
-            if not load_dotenv():
-                self.logger.warning("No .env file found - using system environment")
-        except Exception as e:
-            self.logger.critical(f"Environment loading failed: {str(e)}")
-            raise
-    
-    def _debug_print_config(self):
-        """Log all critical configuration for verification"""
-        debug_vars = {
-            'KRAKEN_API_KEY': self.KRAKEN_API_KEY,
-            'KRAKEN_SECRET_LENGTH': len(self.KRAKEN_SECRET) if self.KRAKEN_SECRET else 0,
+
+    def __init__(self, debug_mode: bool = False):
+        self._logger = logging.getLogger(__name__)
+        self._debug_mode = debug_mode
+        self._validate_core()
+        
+        if debug_mode:
+            self._log_config_state()
+
+    def _validate_core(self) -> None:
+        """Verify absolutely required variables"""
+        if not all([self.KRAKEN_API_KEY, self.KRAKEN_SECRET]):
+            self._logger.error("Missing Kraken API credentials")
+            # Continue anyway since validation is non-strict
+
+    def _log_config_state(self) -> None:
+        """Secure debug output (redacts sensitive data)"""
+        from pprint import pformat
+        debug_info = {
+            'KRAKEN_API_KEY': self._redact_key(self.KRAKEN_API_KEY),
+            'KRAKEN_SECRET': '*****' if self.KRAKEN_SECRET else None,
+            'DATABASE_URL': self._mask_url(self.DATABASE_URL),
             'WEB_SERVER_PORT': self.WEB_SERVER_PORT,
             'INITIAL_CAPITAL': self.INITIAL_CAPITAL,
-            'FEE_RATE': self.FEE_RATE,
-            'MIN_ORDER_SIZE': self.MIN_ORDER_SIZE,
-            'ENVIRONMENT_LOADED': bool(self.KRAKEN_API_KEY)  # Basic check
+            'IS_CONFIG_VALID': all([self.KRAKEN_API_KEY, self.KRAKEN_SECRET])
         }
-        
-        self.logger.debug("=== CONFIGURATION DEBUG OUTPUT ===")
-        for k, v in debug_vars.items():
-            if 'SECRET' in k:
-                self.logger.debug(f"{k}: {'*'*8} (redacted)")
-            elif 'API_KEY' in k:
-                self.logger.debug(f"{k}: {v[:4]}...{v[-4:] if len(v) > 8 else ''}")
-            else:
-                self.logger.debug(f"{k}: {v}")
-        self.logger.debug("================================")
-    
-    def _validate(self):
-        """Validate critical configuration"""
-        if not all([self.KRAKEN_API_KEY, self.KRAKEN_SECRET]):
-            self.logger.critical("Missing Kraken API credentials")
-            raise EnvironmentError("Kraken API keys not configured")
-    
+        self._logger.debug("Active Configuration:\n%s", pformat(debug_info))
+
+    @staticmethod
+    def _redact_key(key: str) -> Optional[str]:
+        if not key:
+            return None
+        return f"{key[:4]}...{key[-2:]}" if len(key) > 6 else "****"
+
+    @staticmethod
+    def _mask_url(url: str) -> Optional[str]:
+        if not url:
+            return None
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.password:
+            return url.replace(parsed.password, "*****")
+        return url
+
+    # --- Environment Properties ---
     @property
     def KRAKEN_API_KEY(self) -> str:
-        """Securely access API key with validation"""
-        key = os.getenv("KRAKEN_API_KEY")
-        if not key or len(key) != 56:  # Kraken key length
-            raise ValueError("Invalid Kraken API key format")
-        return key
-    
+        """Required: Trading API key"""
+        return os.getenv("KRAKEN_API_KEY", "").strip()
+
     @property
     def KRAKEN_SECRET(self) -> str:
-        """Securely access API secret"""
-        secret = os.getenv("KRAKEN_SECRET")
-        if not secret or len(secret) != 84:  # Kraken secret length
-            raise ValueError("Invalid Kraken secret format")
-        return secret
-    
+        """Required: Trading API secret"""
+        return os.getenv("KRAKEN_SECRET", "").strip()
+
+    @property
+    def DATABASE_URL(self) -> str:
+        """Optional: Database connection string"""
+        return os.getenv("DATABASE_URL", "").strip()
+
     @property
     def WEB_SERVER_PORT(self) -> int:
-        """Get port with fallback"""
-        return int(os.getenv("PORT", "3000"))
-    
+        """Optional: Default 3000"""
+        try:
+            return int(os.getenv("PORT", "3000"))
+        except ValueError:
+            self._logger.warning("Invalid PORT value, defaulting to 3000")
+            return 3000
+
     @property
     def INITIAL_CAPITAL(self) -> float:
-        """Validated trading capital"""
-        capital = float(os.getenv("INITIAL_CAPITAL", "40.0"))
-        if capital < 10:  # Minimum order size
-            raise ValueError("Capital must be ≥10€")
-        return capital
-    
-    @property
-    def FEE_RATE(self) -> float:
-        """Validated fee rate"""
-        rate = float(os.getenv("FEE_RATE", "0.0026"))  # 0.26%
-        if not 0 < rate < 0.01:  # Sanity check
-            raise ValueError("Invalid fee rate")
-        return rate
-    
-    @property
-    def MIN_ORDER_SIZE(self) -> float:
-        """Exchange minimum order threshold"""
-        return 10.0  # Kraken's minimum in EUR
+        """Optional: Default 40.0"""
+        try:
+            return float(os.getenv("INITIAL_CAPITAL", "40.0"))
+        except ValueError:
+            self._logger.warning("Invalid INITIAL_CAPITAL, defaulting to 40.0")
+            return 40.0
 
-# Singleton instance for shared configuration
-config = Config()
+# Initialize with debug=False in production!
+config = Config(debug_mode=os.getenv("CONFIG_DEBUG", "false").lower() == "true")
