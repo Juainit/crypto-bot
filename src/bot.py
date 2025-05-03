@@ -1,401 +1,345 @@
+# trading_bot.py
 import os
 import time
-import json
 import logging
 import threading
-import psutil
-import psycopg2
-from threading import Thread, Lock, Event
-from typing import Dict, Optional, Tuple, Any
 from decimal import Decimal, getcontext
-from ccxt import ExchangeError, NetworkError
-from flask import jsonify
-from .config import config
-from .exchange import ExchangeClient
+from typing import Dict, Optional, Tuple, Any
+import ccxt
+from flask import Flask, request, jsonify
+from threading import Thread, Lock, Event
+from functools import wraps
 
-# Configuración de precisión decimal
-getcontext().prec = 8
+# =============================================
+# CONFIGURACIÓN INICIAL
+# =============================================
+app = Flask(__name__)
+getcontext().prec = 8  # Precisión decimal para operaciones
 
-class TradingBot:
-    """
-    Trading Bot profesional con:
-    - Gestión de posiciones atómica
-    - Mecanismos de emergencia
-    - Monitoreo de rendimiento mejorado
-    - Sistema completo de health checks
-    """
-    
+# Constantes configurables
+CONFIG = {
+    'INITIAL_CAPITAL': Decimal('40'),  # 40€ por operación
+    'MIN_ORDER_SIZE': Decimal('10'),    # Mínimo 10€ por orden
+    'FEE_RATE': Decimal('0.0026'),      # 0.26% fee en Kraken
+    'DEFAULT_TRAILING': Decimal('0.02'), # 2% trailing stop
+    'API_TIMEOUT': 30000,               # 30 segundos timeout
+    'MAX_RETRIES': 3,                   # Reintentos para llamadas a API
+}
+
+# =============================================
+# CLASE EXCHANGE CLIENT (INTEGRADA)
+# =============================================
+class ExchangeClient:
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+        return cls._instance
+
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
-        self.exchange = ExchangeClient()
-        self._shutdown_event = Event()
-        
-        # Locks para concurrencia
-        self.lock = Lock()  # Para estado principal
-        self.db_lock = Lock()  # Para operaciones DB
-        
-        # Estado inicial
-        self._reset_state()
-        self._init_db()
-        
-        # Sistemas de monitoreo
-        self._start_health_monitor()
-        self._start_performance_tracker()
+        if self._initialized:
+            return
+            
+        self._initialized = True
+        self.logger = logging.getLogger('Exchange')
+        self.client = self._init_client()
+        self.markets = self._load_markets()
 
-    def _reset_state(self) -> None:
-        """Inicialización segura del estado"""
-        with self.lock:
+    def _init_client(self):
+        """Inicialización segura del cliente de exchange"""
+        try:
+            kraken = ccxt.kraken({
+                'apiKey': os.getenv('KRAKEN_API_KEY'),
+                'secret': os.getenv('KRAKEN_SECRET'),
+                'enableRateLimit': True,
+                'timeout': CONFIG['API_TIMEOUT'],
+                'options': {
+                    'adjustForTimeDifference': True,
+                    'recvWindow': 10000
+                }
+            })
+            
+            # Configuración crítica para producción
+            kraken.nonce = lambda: int(time.time() * 1000)
+            self._sync_exchange_time(kraken)
+            return kraken
+            
+        except Exception as e:
+            self.logger.critical(f"Init failed: {str(e)}")
+            raise
+
+    def _sync_exchange_time(self, client):
+        """Sincronización horaria con el exchange"""
+        try:
+            server_time = client.fetch_time()
+            local_time = int(time.time() * 1000)
+            delta = server_time - local_time
+            if abs(delta) > 1000:  # 1 segundo de diferencia
+                self.logger.warning(f"Time delta detected: {delta}ms")
+        except Exception as e:
+            self.logger.error(f"Time sync failed: {str(e)}")
+
+    def _load_markets(self):
+        """Carga de mercados con reintentos"""
+        for attempt in range(CONFIG['MAX_RETRIES']):
+            try:
+                markets = self.client.load_markets()
+                self.logger.info(f"Loaded {len(markets)} trading pairs")
+                return markets
+            except Exception as e:
+                if attempt == CONFIG['MAX_RETRIES'] - 1:
+                    raise
+                time.sleep(2 ** attempt)
+                self.logger.warning(f"Retrying market load ({attempt + 1}/{CONFIG['MAX_RETRIES']})")
+
+    def get_ticker(self, symbol: str) -> Dict:
+        """Obtiene ticker con validación de símbolo"""
+        try:
+            if symbol not in self.markets:
+                raise ValueError(f"Invalid symbol: {symbol}")
+            return self.client.fetch_ticker(symbol)
+        except Exception as e:
+            self.logger.error(f"Ticker error: {str(e)}")
+            raise
+
+    def create_order(self, order_params: Dict) -> Dict:
+        """Crea orden con validación de tamaño mínimo"""
+        try:
+            # Validación de tamaño mínimo
+            if 'amount' in order_params and 'price' in order_params:
+                order_value = Decimal(order_params['amount']) * Decimal(order_params['price'])
+                if order_value < CONFIG['MIN_ORDER_SIZE']:
+                    raise ValueError(f"Order size below minimum {CONFIG['MIN_ORDER_SIZE']}")
+
+            return self.client.create_order(**order_params)
+        except Exception as e:
+            self.logger.error(f"Order failed: {str(e)}")
+            raise
+
+    def fetch_balance(self) -> Dict:
+        """Obtiene balance con manejo de errores"""
+        try:
+            return self.client.fetch_balance()
+        except Exception as e:
+            self.logger.error(f"Balance error: {str(e)}")
+            raise
+
+# =============================================
+# CLASE TRADING BOT (COMPLETA)
+# =============================================
+class TradingBot:
+    def __init__(self):
+        self.logger = logging.getLogger('TradingBot')
+        self.exchange = ExchangeClient()  # Usa el singleton
+        self._lock = Lock()
+        self._shutdown_event = Event()
+        self._reset_state()
+
+    def _reset_state(self):
+        """Reinicia el estado interno"""
+        with self._lock:
             self.active_position = False
             self.current_symbol = None
-            self.position_id = None
             self.entry_price = Decimal('0')
             self.stop_price = Decimal('0')
             self.position_size = Decimal('0')
-            self.last_update = time.time()
+            self.take_profit = None
 
-    def _init_db(self, max_retries: int = 5) -> None:
-        """Conexión robusta a PostgreSQL con reintentos"""
-        for attempt in range(max_retries):
-            try:
-                with self.db_lock:
-                    self.conn = psycopg2.connect(
-                        config.DATABASE_URL,
-                        connect_timeout=5,
-                        keepalives=1,
-                        keepalives_idle=30
-                    )
-                    self._create_tables()
-                    self.logger.info("Conexión a DB establecida")
-                    return
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    self.logger.critical("Fallo en conexión a DB")
-                    raise
-                backoff = min(2 ** attempt, 30)
-                time.sleep(backoff)
-                self.logger.warning(f"Reintento DB {attempt + 1}/{max_retries}")
-
-    def _create_tables(self) -> None:
-        """Inicialización segura de tablas"""
-        with self.db_lock, self.conn.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS positions (
-                    id SERIAL PRIMARY KEY,
-                    symbol VARCHAR(10) NOT NULL,
-                    entry_price DECIMAL(16,8) NOT NULL,
-                    stop_price DECIMAL(16,8) NOT NULL,
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    closed_at TIMESTAMPTZ,
-                    pnl DECIMAL(16,8)
-                );
-                CREATE TABLE IF NOT EXISTS performance_metrics (
-                    timestamp TIMESTAMPTZ PRIMARY KEY,
-                    data JSONB NOT NULL
-                );
-            """)
-            self.conn.commit()
-
-    # ======================
-    # OPERACIONES DE TRADING
-    # ======================
-    
-    def execute_buy(self, symbol: str, trailing_percent: float) -> Tuple[bool, str]:
-        """
-        Ejecuta compra con validación completa
-        """
-        with self.lock:
+    def execute_buy(self, symbol: str, trailing_percent: Decimal) -> Tuple[bool, str]:
+        """Ejecuta orden de compra con validaciones"""
+        with self._lock:
             if self.active_position:
-                msg = f"Posición activa en {self.current_symbol}"
-                self.logger.warning(msg)
-                return False, msg
-                
+                return False, "Position already active"
+
             try:
-                # Validación de mercado
                 ticker = self.exchange.get_ticker(symbol)
-                if not ticker or 'ask' not in ticker:
-                    return False, "Datos de mercado inválidos"
-                
-                # Cálculos precisos
-                limit_price = Decimal(str(ticker['ask'])) * Decimal('1.01')
-                amount = Decimal(config.INITIAL_CAPITAL) / limit_price
-                
-                # Ejecución orden
+                current_price = Decimal(str(ticker['ask']))
+                amount = (CONFIG['INITIAL_CAPITAL'] / current_price).quantize(Decimal('0.00000001'))
+
                 order = self.exchange.create_order({
                     'symbol': symbol,
                     'type': 'limit',
                     'side': 'buy',
-                    'amount': float(amount.quantize(Decimal('0.00000001'))),
-                    'price': float(limit_price.quantize(Decimal('0.01')))
+                    'amount': float(amount),
+                    'price': float(current_price)
                 })
-                
-                # Actualización de estado
-                stop_price = limit_price * (1 - Decimal(str(trailing_percent)))
-                self._update_position(symbol, limit_price, stop_price, True)
-                
-                # Inicio de trailing stop
-                Thread(
-                    target=self._manage_trailing_stop,
-                    daemon=True,
-                    name=f"TrailingStop-{symbol}"
-                ).start()
-                
-                msg = f"Compra: {amount:.8f} {symbol} @ {limit_price:.2f}€"
-                self.logger.info(msg)
-                return True, msg
-                
-            except NetworkError as e:
-                self.logger.error(f"Error de red: {str(e)}")
-                return False, "Error de conexión"
-            except ExchangeError as e:
-                self.logger.error(f"Error exchange: {str(e)}")
-                return False, "Error en operación"
-            except Exception as e:
-                self.logger.error(f"Error inesperado: {str(e)}", exc_info=True)
-                self._reset_state()
-                return False, f"Error: {str(e)}"
 
-    def _manage_trailing_stop(self) -> None:
-        """Gestión activa del trailing stop"""
-        retry_delay = 60  # Segundos iniciales
-        
-        while not self._shutdown_event.is_set():
+                # Actualizar estado
+                self.active_position = True
+                self.current_symbol = symbol
+                self.entry_price = current_price
+                self.stop_price = current_price * (1 - trailing_percent)
+                self.position_size = amount
+
+                # Iniciar gestión de órdenes
+                Thread(
+                    target=self._manage_position,
+                    daemon=True,
+                    name=f"PositionManager-{symbol}"
+                ).start()
+
+                return True, f"Buy order executed: {order['id']}"
+
+            except Exception as e:
+                self.logger.error(f"Buy failed: {str(e)}")
+                return False, str(e)
+
+    def _manage_position(self):
+        """Gestiona la posición activa (trailing stop)"""
+        while not self._shutdown_event.is_set() and self.active_position:
             try:
-                with self.lock:
-                    if not self.active_position:
-                        break
-                        
+                with self._lock:
                     ticker = self.exchange.get_ticker(self.current_symbol)
                     current_price = Decimal(str(ticker['bid']))
-                    
-                    # Actualización dinámica
-                    new_stop = current_price * (1 - self.trailing_percent)
+
+                    # Actualizar trailing stop
+                    new_stop = current_price * (1 - CONFIG['DEFAULT_TRAILING'])
                     if new_stop > self.stop_price:
                         self.stop_price = new_stop
-                        self._update_stop_price()
-                    
-                    # Verificación de activación
+
+                    # Verificar stop loss
                     if current_price <= self.stop_price:
                         self._execute_sell()
                         break
-                
-                retry_delay = 60  # Resetear delay
-                time.sleep(retry_delay)
-                
-            except Exception as e:
-                self.logger.error(f"Error trailing stop: {str(e)}")
-                retry_delay = min(retry_delay * 2, 300)  # Backoff exponencial
-                time.sleep(retry_delay)
 
-    def _execute_sell(self) -> None:
-        """Ejecuta venta con fallback a mercado"""
-        with self.lock:
-            try:
-                amount = self._get_position_amount()
-                if amount <= Decimal('0'):
-                    raise ValueError("Cantidad inválida")
-                
-                # 1. Intento con orden limitada
+                time.sleep(60)  # Revisar cada minuto
+
+            except Exception as e:
+                self.logger.error(f"Position error: {str(e)}")
+                time.sleep(120)
+
+    def _execute_sell(self) -> Tuple[bool, str]:
+        """Ejecuta orden de venta"""
+        try:
+            with self._lock:
+                if not self.active_position:
+                    return False, "No active position"
+
+                balance = self.exchange.fetch_balance()
+                currency = self.current_symbol.split('/')[0]
+                amount = Decimal(str(balance['free'].get(currency, 0))).quantize(Decimal('0.00000001'))
+
+                # Intentar orden limit primero
                 try:
                     order = self.exchange.create_order({
                         'symbol': self.current_symbol,
                         'type': 'limit',
                         'side': 'sell',
-                        'amount': float(amount.quantize(Decimal('0.00000001'))),
-                        'price': float(self.stop_price.quantize(Decimal('0.00000001')))
+                        'amount': float(amount),
+                        'price': float(self.stop_price)
                     })
                 except Exception:
-                    # 2. Fallback a mercado
+                    # Fallback a market order
                     order = self.exchange.create_order({
                         'symbol': self.current_symbol,
                         'type': 'market',
                         'side': 'sell',
-                        'amount': float(amount.quantize(Decimal('0.00000001')))
+                        'amount': float(amount)
                     })
-                
-                # 3. Actualización consistente
-                pnl = self._calculate_pnl()
-                self._update_position(None, None, None, False)
-                self.logger.info(f"Venta ejecutada. PnL: {pnl:.2f}€")
-                
-            except Exception as e:
-                self.logger.critical(f"Error crítico en venta: {str(e)}")
-                raise
-            finally:
+
                 self._reset_state()
+                return True, f"Sell order executed: {order['id']}"
 
-    # ======================
-    # MÉTODOS DE MONITOREO
-    # ======================
-    
-    def _start_health_monitor(self) -> None:
-        """Inicia hilo de monitoreo de salud"""
-        def monitor():
-            while not self._shutdown_event.is_set():
-                try:
-                    self._check_system_health()
-                    time.sleep(300)  # 5 minutos
-                except Exception as e:
-                    self.logger.error(f"Monitor falló: {str(e)}")
-                    time.sleep(600)
-        
-        Thread(target=monitor, daemon=True, name="HealthMonitor").start()
+        except Exception as e:
+            self.logger.error(f"Sell failed: {str(e)}")
+            return False, str(e)
 
-    def _start_performance_tracker(self) -> None:
-        """Inicia hilo de métricas de rendimiento"""
-        def tracker():
-            while not self._shutdown_event.is_set():
-                try:
-                    self._log_performance_metrics()
-                    time.sleep(300)  # 5 minutos
-                except Exception as e:
-                    self.logger.error(f"Tracker falló: {str(e)}")
-                    time.sleep(600)
-        
-        Thread(target=tracker, daemon=True, name="PerformanceTracker").start()
-
-    def _check_system_health(self) -> Dict[str, bool]:
-        """Verificación completa del sistema"""
-        return {
-            'database': not self.conn.closed,
-            'exchange': self._check_exchange_connectivity(),
-            'position': self._verify_position_state(),
-            'memory': psutil.virtual_memory().percent < 90,
-            'cpu': psutil.cpu_percent(interval=1) < 80
-        }
-
-    def _log_performance_metrics(self) -> None:
-        """Registro de métricas clave"""
-        metrics = {
-            'timestamp': time.time(),
-            'positions': self._count_open_positions(),
-            'performance': float(self._calculate_pnl()),
-            'exchange_latency': self._measure_latency(),
-            'system': {
-                'memory': psutil.virtual_memory().percent,
-                'cpu': psutil.cpu_percent(interval=1)
-            }
-        }
-        self.logger.info(f"Métricas: {metrics}")
-        
-        # Persistencia en DB
-        with self.db_lock, self.conn.cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO performance_metrics (timestamp, data)
-                VALUES (to_timestamp(%s), %s)
-                ON CONFLICT (timestamp) DO UPDATE
-                SET data = EXCLUDED.data
-            """, (metrics['timestamp'], json.dumps(metrics)))
-            self.conn.commit()
-
-    # ======================
-    # MÉTODOS AUXILIARES
-    # ======================
-    
-    def _get_position_amount(self) -> Decimal:
-        """Obtiene cantidad disponible del activo"""
-        with self.lock:
-            if not self.active_position:
-                return Decimal('0')
-            balance = self.exchange.fetch_balance()
-            currency = self.current_symbol.split('/')[0]
-            return Decimal(str(balance['free'].get(currency, 0)))
-
-    def _calculate_pnl(self) -> Decimal:
-        """Calcula ganancias/pérdidas actuales"""
-        with self.lock:
-            if not self.active_position:
-                return Decimal('0')
-            ticker = self.exchange.get_ticker(self.current_symbol)
-            current_price = Decimal(str(ticker['bid']))
-            return (current_price - self.entry_price) * (Decimal(config.INITIAL_CAPITAL) / self.entry_price)
-
-    def _measure_latency(self) -> float:
-        """Mide latencia del exchange"""
-        start = time.time()
-        try:
-            self.exchange.fetch_time()
-            return (time.time() - start) * 1000  # ms
-        except Exception:
-            return -1
-
-    def _update_position(self, symbol: Optional[str], 
-                        entry_price: Optional[Decimal], 
-                        stop_price: Optional[Decimal], 
-                        is_open: bool) -> None:
-        """Actualización atómica de posición"""
-        with self.db_lock:
-            cursor = self.conn.cursor()
-            try:
-                if is_open:
-                    cursor.execute("""
-                        INSERT INTO positions
-                        (symbol, entry_price, stop_price)
-                        VALUES (%s, %s, %s)
-                        RETURNING id
-                    """, (
-                        symbol,
-                        float(entry_price) if entry_price else None,
-                        float(stop_price) if stop_price else None
-                    ))
-                    self.position_id = cursor.fetchone()[0]
-                else:
-                    pnl = self._calculate_pnl()
-                    cursor.execute("""
-                        UPDATE positions
-                        SET closed_at = NOW(),
-                            pnl = %s
-                        WHERE id = %s
-                    """, (
-                        float(pnl) if pnl else None,
-                        self.position_id
-                    ))
-                self.conn.commit()
-            except Exception as e:
-                self.conn.rollback()
-                raise
-
-    def _update_stop_price(self) -> None:
-        """Actualiza stop price en DB"""
-        with self.db_lock:
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                UPDATE positions
-                SET stop_price = %s
-                WHERE id = %s
-            """, (float(self.stop_price), self.position_id))
-            self.conn.commit()
-
-    def _verify_position_state(self) -> bool:
-        """Verifica consistencia estado-DB"""
-        with self.db_lock:
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                SELECT COUNT(*) FROM positions
-                WHERE closed_at IS NULL
-            """)
-            return cursor.fetchone()[0] == (1 if self.active_position else 0)
-
-    def _count_open_positions(self) -> int:
-        """Cuenta posiciones abiertas"""
-        with self.db_lock:
-            cursor = self.conn.cursor()
-            cursor.execute("""
-                SELECT COUNT(*) FROM positions
-                WHERE closed_at IS NULL
-            """)
-            return cursor.fetchone()[0]
-
-    def shutdown(self) -> None:
-        """Apagado controlado"""
+    def shutdown(self):
+        """Apagado seguro del bot"""
         self._shutdown_event.set()
-        with self.lock:
-            if self.active_position:
-                self._execute_sell()
-        with self.db_lock:
-            if hasattr(self, 'conn') and not self.conn.closed:
-                self.conn.close()
+        if self.active_position:
+            self._execute_sell()
 
-# Instancia global con manejo de shutdown
-bot_instance = TradingBot()
-import atexit
-atexit.register(bot_instance.shutdown)
+# =============================================
+# ENDPOINTS API WEB
+# =============================================
+def validate_webhook(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
+        if 'action' not in data or 'symbol' not in data:
+            return jsonify({"error": "Missing required fields"}), 400
+            
+        if data['action'].lower() == 'buy' and 'trailing_stop' not in data:
+            return jsonify({"error": "Missing trailing_stop for buy"}), 400
+            
+        return f(*args, **kwargs)
+    return wrapper
+
+@app.route('/webhook', methods=['POST'])
+@validate_webhook
+def handle_webhook():
+    try:
+        data = request.get_json()
+        symbol = data['symbol'].upper().replace('-', '/')
+        
+        if data['action'].lower() == 'buy':
+            trailing = Decimal(data.get('trailing_stop', CONFIG['DEFAULT_TRAILING']))
+            success, msg = bot.execute_buy(symbol, trailing)
+            
+            if success:
+                return jsonify({"status": "success", "message": msg}), 200
+            return jsonify({"error": msg}), 400
+            
+        return jsonify({"error": "Unsupported action"}), 400
+        
+    except Exception as e:
+        app.logger.error(f"Webhook error: {str(e)}")
+        return jsonify({"error": "Internal error"}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "running",
+        "position_active": bot.active_position,
+        "symbol": bot.current_symbol
+    }), 200
+
+# =============================================
+# INICIALIZACIÓN
+# =============================================
+def setup_logging():
+    """Configuración centralizada de logging"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('trading.log')
+        ]
+    )
+
+def run_server():
+    from waitress import serve
+    port = int(os.getenv("PORT", 3000))
+    serve(
+        app,
+        host="0.0.0.0",
+        port=port,
+        threads=4
+    )
+
+if __name__ == '__main__':
+    setup_logging()
+    bot = TradingBot()
+    atexit.register(bot.shutdown)
+    
+    print("""
+    ====================================
+    🚀 TRADING BOT - PRODUCTION READY
+    ====================================
+    Exchange: Kraken
+    Webhook: POST /webhook
+    Health Check: GET /health
+    ====================================
+    """)
+    
+    run_server()
