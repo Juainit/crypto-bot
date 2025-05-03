@@ -10,7 +10,7 @@ from typing import Dict, Optional, Tuple
 from flask import Flask, request, jsonify
 import ccxt
 from src.config import config
-from exchange import exchange_client  # Cliente de exchange corregido
+from src.exchange import exchange_client  # Cliente de exchange corregido
 
 # =============================================
 # CONFIGURACIÓN GLOBAL

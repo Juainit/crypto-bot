@@ -10,7 +10,7 @@ from functools import wraps
 import ccxt
 from flask import Flask, request, jsonify
 from src.config import config
-from exchange import exchange_client
+from src.exchange import exchange_client
 
 # =============================================
 # CONFIGURACIÓN GLOBAL
