@@ -5,7 +5,6 @@ import logging
 import os
 import time
 import atexit
-import ntplib
 from typing import Tuple, Optional, Dict, Any
 import ccxt
 from functools import wraps
