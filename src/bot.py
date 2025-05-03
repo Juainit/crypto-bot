@@ -315,7 +315,7 @@ def run_server():
         host="0.0.0.0",
         port=config.WEB_SERVER_PORT,
         threads=os.cpu_count() or 4,
-        channel_timeout=120
+        channel_timeout=300
     )
 
 # Instancia global con seguridad
