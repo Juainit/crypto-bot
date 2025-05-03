@@ -21,6 +21,15 @@ MAX_RETRIES = 3
 RETRY_DELAY = 1
 ORDER_TIMEOUT = 30000  # 30 segundos
 DEFAULT_TRAILING = 0.02  # 2%
+INITIAL_CAPITAL = Decimal('40')  # Capital inicial en EUR
+
+# Configuración básica de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger('TradingBot')
 
 # =============================================
 # DECORADORES
@@ -70,13 +79,10 @@ class TradingBot:
         # 3. Conexión con el exchange
         self.exchange = self._init_exchange()
         
-        # 4. Configuración de logging
-        self.logger = self._setup_logger()
-        
-        # 5. Carga inicial de mercados
+        # 4. Carga inicial de mercados
         self._load_markets()
         
-        self.logger.info("Trading Bot inicializado correctamente")
+        logger.info("Trading Bot inicializado correctamente")
 
     def _init_exchange(self):
         """Configuración robusta de la conexión con Kraken"""
@@ -114,28 +120,6 @@ class TradingBot:
             
         return generator
 
-    def _setup_logger(self):
-        """Configuración profesional del logger"""
-        logger = logging.getLogger('TradingBot')
-        logger.setLevel(logging.INFO)
-        
-        formatter = logging.Formatter(
-            '%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        
-        # Console handler
-        ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
-        
-        # File handler
-        fh = logging.FileHandler('trading.log')
-        fh.setFormatter(formatter)
-        
-        logger.addHandler(ch)
-        logger.addHandler(fh)
-        return logger
-
     def _reset_trading_state(self):
         """Reinicia el estado de trading"""
         self.active_position = False
@@ -146,14 +130,15 @@ class TradingBot:
         self.take_profit = None
         self.last_order_id = None
         self.last_update = None
+        self.current_capital = INITIAL_CAPITAL
 
     def _load_markets(self):
         """Carga los mercados disponibles con manejo de errores"""
         try:
             self.exchange.load_markets()
-            self.logger.info("Mercados cargados correctamente")
+            logger.info("Mercados cargados correctamente")
         except Exception as e:
-            self.logger.error(f"Error cargando mercados: {str(e)}")
+            logger.error(f"Error cargando mercados: {str(e)}")
             raise
 
     def _validate_symbol(self, symbol: str) -> bool:
@@ -173,7 +158,7 @@ class TradingBot:
                     raise
                 time.sleep(RETRY_DELAY * (attempt + 1))
             except Exception as e:
-                self.logger.error(f"Error obteniendo ticker: {str(e)}")
+                logger.error(f"Error obteniendo ticker: {str(e)}")
                 return None
 
     def _get_min_order_size(self, symbol: str) -> Decimal:
@@ -182,7 +167,7 @@ class TradingBot:
             market = self.exchange.market(symbol)
             return Decimal(str(market['limits']['amount']['min']))
         except Exception as e:
-            self.logger.warning(f"Usando mínimo por defecto: {str(e)}")
+            logger.warning(f"Usando mínimo por defecto: {str(e)}")
             return Decimal('0.00000001')
 
     def _execute_with_retry(self, func, *args, **kwargs):
@@ -227,7 +212,7 @@ class TradingBot:
                 return False, "Error obteniendo datos del mercado"
                 
             current_price = Decimal(str(ticker['ask']))
-            amount = (Decimal('40') / current_price).quantize(Decimal('0.00000001'))
+            amount = (self.current_capital / current_price).quantize(Decimal('0.00000001'))
             
             # Validar tamaño mínimo
             min_amount = self._get_min_order_size(symbol)
@@ -255,7 +240,7 @@ class TradingBot:
             self.last_order_id = order['id']
             self.last_update = datetime.now()
             
-            self.logger.info(
+            logger.info(
                 f"COMPRA | {symbol} | "
                 f"Precio: {current_price:.8f} | "
                 f"Size: {amount:.8f} | "
@@ -265,7 +250,7 @@ class TradingBot:
             
             return True, order['id']
         except Exception as e:
-            self.logger.error(f"Error en compra: {str(e)}", exc_info=True)
+            logger.error(f"Error en compra: {str(e)}", exc_info=True)
             return False, f"Error interno: {str(e)}"
 
     @synchronized('_lock')
@@ -273,7 +258,7 @@ class TradingBot:
         """Ejecuta venta con fallback a mercado"""
         try:
             if not self.active_position:
-                self.logger.warning("No hay posición activa")
+                logger.warning("No hay posición activa")
                 return False, "No hay posición activa"
             
             # Obtener balance
@@ -292,7 +277,7 @@ class TradingBot:
                     price=float(self.stop_price),
                     params={'timeout': ORDER_TIMEOUT}
                 )
-                self.logger.info(f"VENTA LIMITE | {order['id']}")
+                logger.info(f"VENTA LIMITE | {order['id']}")
             except Exception:
                 # Fallback a market order
                 order = self._execute_with_retry(
@@ -303,18 +288,26 @@ class TradingBot:
                     amount=float(amount),
                     params={'timeout': ORDER_TIMEOUT}
                 )
-                self.logger.warning(f"VENTA MERCADO | {order['id']}")
+                logger.warning(f"VENTA MERCADO | {order['id']}")
+            
+            # Calcular ganancias/pérdidas y actualizar capital
+            ticker = self._safe_get_ticker(self.current_symbol)
+            if ticker:
+                current_price = Decimal(str(ticker['bid']))
+                profit = (current_price - self.entry_price) * self.position_size
+                self.current_capital += profit
+                logger.info(f"Resultado operación: {profit:.2f} EUR | Capital actual: {self.current_capital:.2f} EUR")
             
             # Resetear estado
             self._reset_trading_state()
             return True, order['id']
         except Exception as e:
-            self.logger.critical(f"Error en venta: {str(e)}", exc_info=True)
+            logger.critical(f"Error en venta: {str(e)}", exc_info=True)
             return False, f"Error en venta: {str(e)}"
 
     def manage_orders(self):
         """Gestiona stops y toma de ganancias"""
-        self.logger.info("Iniciando gestión de órdenes")
+        logger.info("Iniciando gestión de órdenes")
         
         while not self._shutdown_event.is_set():
             try:
@@ -325,7 +318,7 @@ class TradingBot:
                     
                     # Verificar timeout de orden
                     if self.last_update and (datetime.now() - self.last_update) > timedelta(minutes=30):
-                        self.logger.warning("Timeout de posición, cerrando...")
+                        logger.warning("Timeout de posición, cerrando...")
                         self.execute_sell()
                         continue
                     
@@ -338,39 +331,39 @@ class TradingBot:
                     
                     # Verificar stop loss
                     if current_price <= self.stop_price:
-                        self.logger.info("Stop loss activado")
+                        logger.info("Stop loss activado")
                         self.execute_sell()
                         continue
                     
                     # Verificar take profit
                     if self.take_profit and current_price >= self.take_profit:
-                        self.logger.info("Take profit activado")
+                        logger.info("Take profit activado")
                         self.execute_sell()
                         continue
                     
                     # Ajustar trailing stop (solo si el precio sube)
-                    new_stop = current_price * (1 - Decimal('0.02'))  # 2% trailing
+                    new_stop = current_price * (1 - Decimal(str(DEFAULT_TRAILING)))
                     if new_stop > self.stop_price:
                         self.stop_price = new_stop
                         self.last_update = datetime.now()
-                        self.logger.debug(f"Nuevo stop: {self.stop_price:.8f}")
+                        logger.debug(f"Nuevo stop: {self.stop_price:.8f}")
                 
                 time.sleep(60)  # Verificar cada minuto
             except Exception as e:
-                self.logger.error(f"Error en gestión de órdenes: {str(e)}")
+                logger.error(f"Error en gestión de órdenes: {str(e)}")
                 time.sleep(300)
 
     def shutdown(self):
         """Apagado seguro del bot"""
-        self.logger.info("Iniciando apagado...")
+        logger.info("Iniciando apagado...")
         self._shutdown_event.set()
         
         if self.active_position:
             success, msg = self.execute_sell()
             if not success:
-                self.logger.error(f"No se pudo cerrar posición: {msg}")
+                logger.error(f"No se pudo cerrar posición: {msg}")
         
-        self.logger.info("Bot detenido correctamente")
+        logger.info("Bot detenido correctamente")
 
 # =============================================
 # ENDPOINTS API WEB
@@ -382,7 +375,8 @@ def health_check():
         "status": "running",
         "timestamp": datetime.now().isoformat(),
         "position_active": bot.active_position,
-        "symbol": bot.current_symbol
+        "symbol": bot.current_symbol,
+        "current_capital": float(bot.current_capital)
     }), 200
 
 @app.route('/webhook', methods=['POST'])
@@ -415,7 +409,8 @@ def handle_webhook():
                     "order_id": response,
                     "symbol": symbol,
                     "trailing_stop": trailing,
-                    "take_profit": take_profit
+                    "take_profit": take_profit,
+                    "current_capital": float(bot.current_capital)
                 }), 200
                 
             return jsonify({"error": response}), 400
@@ -424,12 +419,13 @@ def handle_webhook():
             success, response = bot.execute_sell()
             return jsonify({
                 "status": "success" if success else "error",
-                "message": response
+                "message": response,
+                "current_capital": float(bot.current_capital)
             }), 200 if success else 400
             
         return jsonify({"error": "Acción no soportada"}), 400
     except Exception as e:
-        app.logger.error(f"Error en webhook: {str(e)}", exc_info=True)
+        logger.error(f"Error en webhook: {str(e)}", exc_info=True)
         return jsonify({"error": "Error interno del servidor"}), 500
 
 # =============================================
@@ -441,6 +437,8 @@ def run_server():
     
     port = int(os.getenv("PORT", 3000))
     workers = int(os.getenv("WORKERS", 4))
+    
+    logger.info(f"Iniciando servidor en puerto {port} con {workers} workers")
     
     serve(
         app,
