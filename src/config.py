@@ -16,7 +16,7 @@ class Config:
     def __init__(self):
         self._validate_core()
         self._log_config_state()
-
+    
     def _validate_core(self) -> None:
         """Valida variables críticas para producción"""
         missing = []
@@ -30,31 +30,31 @@ class Config:
         if missing:
             logger.critical("Variables faltantes: %s", ", ".join(missing))
             raise EnvironmentError("Configuración incompleta")
-
+    
     @property
     def KRAKEN_API_KEY(self) -> str:
         """API Key de Kraken (requerida)"""
         return os.getenv("KRAKEN_API_KEY", "")
-
+    
     @property
     def KRAKEN_SECRET(self) -> str:
         """API Secret de Kraken (requerida)"""
         return os.getenv("KRAKEN_SECRET", "")
-
+    
     @property
     def DATABASE_URL(self) -> str:
-        """URL de PostgreSQL (prioriza conexión interna en producción)"""
+        """URL de PostgreSQL (usa DATABASE_URL en producción)"""
         if self.IS_PRODUCTION:
-            return os.getenv("PRIVATE_DATABASE_URL", "")  # URL interna
-        return os.getenv("PUBLIC_DATABASE_URL", "")  # URL pública
-
+            return os.getenv("DATABASE_URL", "")  # Corregido para Railway [4]
+        return os.getenv("PUBLIC_DATABASE_URL", "")
+    
     @property
     def WEB_SERVER_PORT(self) -> int:
         """Puerto HTTP (usa variable PORT en producción)"""
         if self.IS_PRODUCTION:
             return int(os.getenv("PORT", "3000"))
         return int(os.getenv("WEB_SERVER_PORT", "3000"))
-
+    
     @property
     def INITIAL_CAPITAL(self) -> float:
         """Capital inicial en EUR (valor seguro por defecto)"""
@@ -63,23 +63,23 @@ class Config:
         except ValueError:
             logger.warning("INITIAL_CAPITAL inválido, usando 40.0")
             return 40.0
-
+    
     @property
     def IS_PRODUCTION(self) -> bool:
         """Detecta entorno de producción (Railway)"""
         return bool(os.getenv("RAILWAY_ENVIRONMENT"))
-
+    
     @property
     def SSL_DATABASE(self) -> bool:
         """Habilita SSL para PostgreSQL en producción"""
         return self.IS_PRODUCTION
-
+    
     def _redact_key(self, key: str) -> Optional[str]:
         """Enmascara datos sensibles para logging"""
         if not key:
             return None
         return f"{key[:2]}***{key[-2:]}" if len(key) > 4 else "****"
-
+    
     def _log_config_state(self) -> None:
         """Log seguro de configuración inicial"""
         debug_info = {
