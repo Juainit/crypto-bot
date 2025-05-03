@@ -24,31 +24,6 @@ ORDER_TIMEOUT = 30000  # 30 segundos
 DEFAULT_TRAILING = 0.02  # 2%
 
 # =============================================
-# VERIFICACIÓN DE TIEMPO
-# =============================================
-def verify_time_sync():
-    """Verifica la sincronización del reloj del sistema con servidores NTP"""
-    try:
-        ntp_client = ntplib.NTPClient()
-        response = ntp_client.request('pool.ntp.org')
-        current_time = time.time()
-        ntp_time = response.tx_time
-        time_diff = abs(current_time - ntp_time)
-        
-        if time_diff > 10:  # Más de 10 segundos de diferencia
-            logging.warning(f"El reloj del sistema está desincronizado. Diferencia: {time_diff:.2f} segundos")
-            
-        # Ajuste sutil del tiempo (no reemplazamos time.time)
-        time_offset = ntp_time - current_time
-        if abs(time_offset) > 1:
-            logging.info(f"Ajustando reloj local con offset de {time_offset:.2f} segundos")
-            
-    except Exception as e:
-        logging.error(f"No se pudo verificar sincronización horaria: {str(e)}")
-
-verify_time_sync()
-
-# =============================================
 # DECORADORES
 # =============================================
 def synchronized(lock_name: str):
