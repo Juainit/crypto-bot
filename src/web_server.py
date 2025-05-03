@@ -43,11 +43,11 @@ def validate_webhook(f):
         data = request.get_json()
         if not data:
             return jsonify({"error": "No se proporcionaron datos"}), 400
-            
+        
         required = ['action', 'symbol']
         if not all(k in data for k in required):
             return jsonify({"error": f"Faltan campos requeridos: {required}"}), 400
-            
+        
         if data['action'].lower() == 'buy' and 'trailing_stop' not in data:
             return jsonify({"error": "Falta trailing_stop para compra"}), 400
             
@@ -85,7 +85,7 @@ class TradingBot:
         
         if not api_key or not secret:
             raise ValueError("Las credenciales de Kraken no están configuradas")
-            
+        
         exchange = ccxt.kraken({
             'apiKey': api_key,
             'secret': secret,
@@ -94,15 +94,25 @@ class TradingBot:
             'rateLimit': 3000,
             'options': {
                 'adjustForTimeDifference': True,
-                'recvWindow': 10000,
-                'api-expires': int(time.time()) + 60
+                'recvWindow': 10000
             }
         })
         
         # Solución definitiva para nonce
-        exchange.nonce = lambda: int(time.time() * 1000)
-        
+        exchange.nonce = self._create_nonce_generator()
         return exchange
+
+    def _create_nonce_generator(self):
+        """Generador de nonce robusto para Kraken"""
+        last_nonce = int(time.time() * 1000)
+        
+        def generator():
+            nonlocal last_nonce
+            current = int(time.time() * 1000)
+            last_nonce = current if current > last_nonce else last_nonce + 1
+            return last_nonce
+            
+        return generator
 
     def _setup_logger(self):
         """Configuración profesional del logger"""
@@ -124,7 +134,6 @@ class TradingBot:
         
         logger.addHandler(ch)
         logger.addHandler(fh)
-        
         return logger
 
     def _reset_trading_state(self):
@@ -149,8 +158,8 @@ class TradingBot:
 
     def _validate_symbol(self, symbol: str) -> bool:
         """Valida el formato del símbolo"""
-        return (isinstance(symbol, str) and 
-                '/' in symbol and 
+        return (isinstance(symbol, str) and
+                '/' in symbol and
                 len(symbol.split('/')) == 2 and
                 symbol in self.exchange.markets)
 
@@ -179,15 +188,16 @@ class TradingBot:
     def _execute_with_retry(self, func, *args, **kwargs):
         """Ejecuta una función con reintentos para errores de API"""
         last_exception = None
+        
         for attempt in range(MAX_RETRIES):
             try:
+                # Regenerar nonce en cada intento
+                self.exchange.nonce = self._create_nonce_generator()
                 return func(*args, **kwargs)
             except ccxt.InvalidNonce as e:
                 last_exception = e
                 if attempt == MAX_RETRIES - 1:
                     break
-                # Regenerar nonce
-                self.exchange.nonce = lambda: int(time.time() * 1000)
                 time.sleep(RETRY_DELAY * (attempt + 1))
             except ccxt.NetworkError as e:
                 last_exception = e
@@ -210,7 +220,7 @@ class TradingBot:
                 
             if self.active_position:
                 return False, "Ya existe una posición activa"
-                
+            
             # Obtener datos del mercado
             ticker = self._safe_get_ticker(symbol)
             if not ticker:
@@ -223,7 +233,7 @@ class TradingBot:
             min_amount = self._get_min_order_size(symbol)
             if amount < min_amount:
                 return False, f"Cantidad menor al mínimo ({min_amount})"
-                
+            
             # Ejecutar orden con reintentos
             order = self._execute_with_retry(
                 self.exchange.create_order,
@@ -254,7 +264,6 @@ class TradingBot:
             )
             
             return True, order['id']
-            
         except Exception as e:
             self.logger.error(f"Error en compra: {str(e)}", exc_info=True)
             return False, f"Error interno: {str(e)}"
@@ -266,7 +275,7 @@ class TradingBot:
             if not self.active_position:
                 self.logger.warning("No hay posición activa")
                 return False, "No hay posición activa"
-                
+            
             # Obtener balance
             balance = self._execute_with_retry(self.exchange.fetch_balance)
             currency = self.current_symbol.split('/')[0]
@@ -298,9 +307,7 @@ class TradingBot:
             
             # Resetear estado
             self._reset_trading_state()
-            
             return True, order['id']
-            
         except Exception as e:
             self.logger.critical(f"Error en venta: {str(e)}", exc_info=True)
             return False, f"Error en venta: {str(e)}"
@@ -315,13 +322,13 @@ class TradingBot:
                     if not self.active_position:
                         time.sleep(10)
                         continue
-                        
+                    
                     # Verificar timeout de orden
                     if self.last_update and (datetime.now() - self.last_update) > timedelta(minutes=30):
                         self.logger.warning("Timeout de posición, cerrando...")
                         self.execute_sell()
                         continue
-                        
+                    
                     ticker = self._safe_get_ticker(self.current_symbol)
                     if not ticker:
                         time.sleep(60)
@@ -334,22 +341,21 @@ class TradingBot:
                         self.logger.info("Stop loss activado")
                         self.execute_sell()
                         continue
-                        
+                    
                     # Verificar take profit
                     if self.take_profit and current_price >= self.take_profit:
                         self.logger.info("Take profit activado")
                         self.execute_sell()
                         continue
-                        
+                    
                     # Ajustar trailing stop (solo si el precio sube)
                     new_stop = current_price * (1 - Decimal('0.02'))  # 2% trailing
                     if new_stop > self.stop_price:
                         self.stop_price = new_stop
                         self.last_update = datetime.now()
                         self.logger.debug(f"Nuevo stop: {self.stop_price:.8f}")
-                        
-                time.sleep(60)  # Verificar cada minuto
                 
+                time.sleep(60)  # Verificar cada minuto
             except Exception as e:
                 self.logger.error(f"Error en gestión de órdenes: {str(e)}")
                 time.sleep(300)
@@ -388,7 +394,7 @@ def handle_webhook():
         symbol = data['symbol'].upper().replace('-', '/')
         
         if data['action'].lower() == 'buy':
-            trailing = float(data.get('trailing_stop', DEFAULT_TRAILING))
+            trailing = float(data.get('trailing_stop',_TRAILING))
             take_profit = float(data.get('take_profit')) if 'take_profit' in data else None
             
             success, response = bot.execute_buy(
@@ -422,7 +428,6 @@ def handle_webhook():
             }), 200 if success else 400
             
         return jsonify({"error": "Acción no soportada"}), 400
-        
     except Exception as e:
         app.logger.error(f"Error en webhook: {str(e)}", exc_info=True)
         return jsonify({"error": "Error interno del servidor"}), 500
