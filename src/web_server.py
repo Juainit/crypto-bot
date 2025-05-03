@@ -1,41 +1,40 @@
-from flask import Flask, request, jsonify
-from threading import Thread, Lock, Event
-from decimal import Decimal, getcontext
-import logging
 import os
 import time
 import atexit
-from typing import Tuple, Optional, Dict, Any
-import ccxt
+import logging
+from decimal import Decimal, getcontext
+from threading import Thread, Lock, Event
 from functools import wraps
-from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple
+
+from flask import Flask, request, jsonify
+import ccxt
+from config import config
+from exchange import exchange_client  # Cliente de exchange corregido
 
 # =============================================
-# CONFIGURACIÓN INICIAL
+# CONFIGURACIÓN GLOBAL
 # =============================================
 app = Flask(__name__)
 getcontext().prec = 8  # Precisión decimal para operaciones financieras
 
-# Constantes
-MAX_RETRIES = 3
-RETRY_DELAY = 1
-ORDER_TIMEOUT = 30000  # 30 segundos
-DEFAULT_TRAILING = 0.02  # 2%
-INITIAL_CAPITAL = Decimal('40')  # Capital inicial en EUR
-
-# Configuración mejorada de logging
+# Configuración profesional de logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format='%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('trading.log')
+    ]
 )
-logger = logging.getLogger('TradingBot')
+logger = logging.getLogger('TradingServer')
 
 # =============================================
-# DECORADORES
+# DECORADORES Y HELPERS
 # =============================================
 def synchronized(lock_name: str):
-    """Decorador para sincronización thread-safe"""
+    """Decorador thread-safe para operaciones críticas"""
     def decorator(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
@@ -46,436 +45,309 @@ def synchronized(lock_name: str):
     return decorator
 
 def validate_webhook(f):
-    """Middleware de validación para webhooks"""
+    """Validador profesional de webhooks"""
     @wraps(f)
     def wrapper(*args, **kwargs):
+        if not request.is_json:
+            return jsonify({"error": "Encabezado Content-Type debe ser application/json"}), 415
+            
         data = request.get_json()
-        if not data:
-            return jsonify({"error": "No se proporcionaron datos"}), 400
+        required_fields = {'action', 'symbol'}
+        missing = required_fields - set(data.keys())
         
-        required = ['action', 'symbol']
-        if not all(k in data for k in required):
-            return jsonify({"error": f"Faltan campos requeridos: {required}"}), 400
-        
+        if missing:
+            return jsonify({"error": f"Campos requeridos faltantes: {', '.join(missing)}"}), 400
+            
         if data['action'].lower() == 'buy' and 'trailing_stop' not in data:
-            return jsonify({"error": "Falta trailing_stop para compra"}), 400
+            return jsonify({"error": "Parámetro trailing_stop requerido para compras"}), 400
             
         return f(*args, **kwargs)
     return wrapper
 
 # =============================================
-# CLASE PRINCIPAL DEL TRADING BOT (VERSIÓN CORREGIDA)
+# CORE DEL TRADING BOT (VERSIÓN PRODUCCIÓN)
 # =============================================
-class TradingBot:
+class TradingEngine:
     def __init__(self):
-        """Inicialización con generador de nonce mejorado"""
-        # 1. Sistema de bloqueo y eventos
         self._lock = Lock()
         self._shutdown_event = Event()
+        self._position_lock = Lock()
+        self._reset_state()
         
-        # 2. Estado del trading
-        self._reset_trading_state()
-        
-        # 3. Conexión con el exchange (mejorada)
-        self.exchange = self._init_exchange()
-        self._sync_exchange_time()  # Nueva sincronización
-        
-        # 4. Carga inicial de mercados
-        self._load_markets()
-        
-        logger.info("Trading Bot inicializado correctamente")
+        # Estado inicial validado
+        self.current_capital = Decimal(str(config.INITIAL_CAPITAL))
+        logger.info(f"Motor inicializado con capital: {self.current_capital}€")
 
-    def _init_exchange(self):
-        """Configuración robusta de Kraken con nonce seguro"""
-        api_key = os.getenv('KRAKEN_API_KEY')
-        secret = os.getenv('KRAKEN_SECRET')
-        
-        if not api_key or not secret:
-            raise ValueError("Credenciales de Kraken no configuradas")
-
-        exchange = ccxt.kraken({
-            'apiKey': api_key,
-            'secret': secret,
-            'enableRateLimit': True,
-            'timeout': ORDER_TIMEOUT,
-            'options': {
-                'adjustForTimeDifference': True,
-                'recvWindow': 10000
-            }
-        })
-        
-        exchange.nonce = self._create_nonce_generator()
-        return exchange
-
-    def _sync_exchange_time(self):
-        """Sincroniza el tiempo local con Kraken"""
-        try:
-            server_time = self.exchange.fetch_time()
-            local_time = int(time.time() * 1000)
-            delta = server_time - local_time
-            if abs(delta) > 1000:  # 1 segundo de diferencia
-                logger.warning(f"Diferencia de tiempo detectada: {delta}ms")
-        except Exception as e:
-            logger.error(f"Error sincronizando tiempo: {str(e)}")
-
-    def _create_nonce_generator(self):
-        """Generador de nonce inmune a desincronización"""
-        last_nonce = int(time.time() * 1000)
-        
-        def generator():
-            nonlocal last_nonce
-            current = int(time.time() * 1000)
-            last_nonce = current if current > last_nonce else last_nonce + 1
-            return last_nonce
-            
-        return generator
-
-    def _reset_trading_state(self):
-        """Reinicia el estado de trading"""
-        self.active_position = False
-        self.current_symbol = None
-        self.entry_price = None
-        self.stop_price = None
-        self.position_size = Decimal('0')
-        self.take_profit = None
-        self.last_order_id = None
-        self.last_update = None
-        self.current_capital = INITIAL_CAPITAL
-
-    def _load_markets(self):
-        """Carga los mercados disponibles con manejo de errores"""
-        try:
-            self.exchange.load_markets()
-            logger.info("Mercados cargados correctamente")
-        except Exception as e:
-            logger.error(f"Error cargando mercados: {str(e)}")
-            raise
-
-    def _validate_symbol(self, symbol: str) -> bool:
-        """Valida el formato del símbolo"""
-        return (isinstance(symbol, str) and
-                '/' in symbol and
-                len(symbol.split('/')) == 2 and
-                symbol in self.exchange.markets)
-
-    def _safe_get_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Obtiene ticker con manejo de errores"""
-        for attempt in range(MAX_RETRIES):
-            try:
-                return self.exchange.fetch_ticker(symbol)
-            except ccxt.NetworkError as e:
-                if attempt == MAX_RETRIES - 1:
-                    raise
-                time.sleep(RETRY_DELAY * (attempt + 1))
-            except Exception as e:
-                logger.error(f"Error obteniendo ticker: {str(e)}")
-                return None
-
-    def _get_min_order_size(self, symbol: str) -> Decimal:
-        """Obtiene tamaño mínimo de orden"""
-        try:
-            market = self.exchange.market(symbol)
-            return Decimal(str(market['limits']['amount']['min']))
-        except Exception as e:
-            logger.warning(f"Usando mínimo por defecto: {str(e)}")
-            return Decimal('0.00000001')
-
-    def _execute_with_retry(self, func, *args, **kwargs):
-        """Ejecuta con reintentos y regeneración de nonce"""
-        last_exception = None
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                # Regenerar nonce y sincronizar tiempo
-                self.exchange.nonce = self._create_nonce_generator()
-                self._sync_exchange_time()
-                return func(*args, **kwargs)
-            except ccxt.InvalidNonce as e:
-                last_exception = e
-                if attempt == MAX_RETRIES - 1:
-                    break
-                time.sleep(RETRY_DELAY * (attempt + 1))
-            except ccxt.NetworkError as e:
-                last_exception = e
-                if attempt == MAX_RETRIES - 1:
-                    break
-                time.sleep(RETRY_DELAY * (attempt + 1))
-            except Exception as e:
-                last_exception = e
-                break
-                
-        raise last_exception if last_exception else Exception("Error desconocido")
+    def _reset_state(self):
+        """Reinicio seguro del estado de trading"""
+        with self._position_lock:
+            self.active_position = False
+            self.current_symbol = None
+            self.entry_price = Decimal('0')
+            self.stop_price = Decimal('0')
+            self.position_size = Decimal('0')
+            self.take_profit = None
+            self.last_order_id = None
+            self.last_update = time.time()
 
     @synchronized('_lock')
-    def execute_buy(self, symbol: str, trailing_percent: float, take_profit: float = None) -> Tuple[bool, str]:
-        """Ejecuta orden de compra con validaciones"""
+    def execute_order(self, order_type: str, params: Dict) -> Tuple[bool, str]:
+        """Ejecuta órdenes con gestión profesional de errores"""
         try:
-            # Validaciones iniciales
-            if not self._validate_symbol(symbol):
-                return False, "Formato de símbolo inválido"
-                
-            if self.active_position:
-                return False, "Ya existe una posición activa"
+            # Sincronización temporal antes de cada operación
+            exchange_client._sync_exchange_time(exchange_client.client)
             
-            # Obtener datos del mercado
-            ticker = self._safe_get_ticker(symbol)
-            if not ticker:
-                return False, "Error obteniendo datos del mercado"
-                
-            current_price = Decimal(str(ticker['ask']))
-            amount = (self.current_capital / current_price).quantize(Decimal('0.00000001'))
-            
-            # Validar tamaño mínimo
-            min_amount = self._get_min_order_size(symbol)
-            if amount < min_amount:
-                return False, f"Cantidad menor al mínimo ({min_amount})"
-            
-            # Ejecutar orden con reintentos
-            order = self._execute_with_retry(
-                self.exchange.create_order,
-                symbol=symbol,
-                type='limit',
-                side='buy',
-                amount=float(amount),
-                price=float(current_price),
-                params={'timeout': ORDER_TIMEOUT}
-            )
-            
-            # Actualizar estado
-            self.active_position = True
-            self.current_symbol = symbol
-            self.entry_price = current_price
-            self.stop_price = current_price * (1 - Decimal(str(trailing_percent)))
-            self.position_size = amount
-            self.take_profit = current_price * (1 + Decimal(str(take_profit))) if take_profit else None
-            self.last_order_id = order['id']
-            self.last_update = datetime.now()
+            # Generación de nonce integrada en el cliente de exchange
+            order = exchange_client.create_order(params)
             
             logger.info(
-                f"COMPRA | {symbol} | "
-                f"Precio: {current_price:.8f} | "
-                f"Size: {amount:.8f} | "
-                f"Stop: {self.stop_price:.8f}" +
-                (f" | TP: {self.take_profit:.8f}" if take_profit else "")
+                f"ORDEN EJECUTADA | {order['id']} | "
+                f"{params['symbol']} | "
+                f"Tipo: {order_type.upper()} | "
+                f"Monto: {params['amount']:.6f}"
             )
             
             return True, order['id']
+            
+        except ccxt.InvalidNonce as e:
+            logger.warning("Nonce inválido detectado, reintentando...")
+            return self.execute_order(order_type, params)  # Reintento automático
+            
+        except ccxt.NetworkError as e:
+            logger.error(f"Error de red: {str(e)}")
+            return False, str(e)
+            
+        except Exception as e:
+            logger.critical(f"Error crítico: {str(e)}", exc_info=True)
+            return False, str(e)
+
+    @synchronized('_lock')
+    def execute_buy(self, symbol: str, trailing: float) -> Tuple[bool, str]:
+        """Lógica profesional de compra"""
+        try:
+            # Validación de mercado
+            market = exchange_client.markets.get(symbol)
+            if not market:
+                return False, f"Par {symbol} no disponible"
+                
+            # Cálculo preciso del monto
+            ticker = exchange_client.client.fetch_ticker(symbol)
+            price = Decimal(str(ticker['ask']))
+            amount = (self.current_capital / price).quantize(Decimal('0.00000000'))
+            
+            # Validación de límites del exchange
+            if amount < Decimal(str(market['limits']['amount']['min'])):
+                return False, f"Monto mínimo no alcanzado: {market['limits']['amount']['min']}"
+            
+            # Parámetros de la orden
+            order_params = {
+                'symbol': symbol,
+                'type': 'limit',
+                'side': 'buy',
+                'amount': float(amount),
+                'price': float(price),
+                'params': {
+                    'timeInForce': 'GTC',
+                    'trailingStop': float(trailing)
+                }
+            }
+            
+            success, order_id = self.execute_order('buy', order_params)
+            
+            if success:
+                with self._position_lock:
+                    self.active_position = True
+                    self.current_symbol = symbol
+                    self.entry_price = price
+                    self.stop_price = price * (1 - Decimal(str(trailing)))
+                    self.position_size = amount
+                    self.last_order_id = order_id
+                    self.last_update = time.time()
+                
+                Thread(target=self._manage_position, daemon=True).start()
+            
+            return success, order_id
+            
         except Exception as e:
             logger.error(f"Error en compra: {str(e)}", exc_info=True)
-            return False, f"Error interno: {str(e)}"
+            return False, str(e)
+
+    def _manage_position(self):
+        """Gestión profesional de posiciones abiertas"""
+        logger.info("Iniciando monitor de posición")
+        while self.active_position and not self._shutdown_event.is_set():
+            try:
+                # Timeout de seguridad de 30 minutos
+                if time.time() - self.last_update > 1800:
+                    logger.warning("Timeout de posición, liquidando...")
+                    self.execute_sell()
+                    break
+                
+                # Actualización de precios
+                ticker = exchange_client.client.fetch_ticker(self.current_symbol)
+                current_price = Decimal(str(ticker['bid']))
+                
+                # Check stop loss
+                if current_price <= self.stop_price:
+                    logger.info("Stop loss activado")
+                    self.execute_sell()
+                    break
+                
+                # Ajuste dinámico del trailing stop
+                new_stop = current_price * (1 - Decimal('0.02'))  # 2% trailing
+                if new_stop > self.stop_price:
+                    with self._position_lock:
+                        self.stop_price = new_stop
+                        self.last_update = time.time()
+                    logger.debug(f"Actualizado stop loss: {new_stop:.4f}")
+                
+                time.sleep(60)
+                
+            except Exception as e:
+                logger.error(f"Error en monitor: {str(e)}")
+                time.sleep(30)
 
     @synchronized('_lock')
     def execute_sell(self) -> Tuple[bool, str]:
-        """Ejecuta venta con fallback a mercado"""
+        """Lógica profesional de venta"""
         try:
             if not self.active_position:
-                logger.warning("No hay posición activa")
-                return False, "No hay posición activa"
+                return False, "Sin posición activa"
             
-            # Obtener balance
-            balance = self._execute_with_retry(self.exchange.fetch_balance)
+            # Obtener balance actualizado
+            balance = exchange_client.get_balance()
             currency = self.current_symbol.split('/')[0]
-            amount = Decimal(str(balance['free'][currency])).quantize(Decimal('0.00000001'))
+            amount = Decimal(str(balance['free'][currency])).quantize(Decimal('0.00000000'))
             
             # Intentar orden limit primero
             try:
-                order = self._execute_with_retry(
-                    self.exchange.create_order,
-                    symbol=self.current_symbol,
-                    type='limit',
-                    side='sell',
-                    amount=float(amount),
-                    price=float(self.stop_price),
-                    params={'timeout': ORDER_TIMEOUT}
-                )
-                logger.info(f"VENTA LIMITE | {order['id']}")
-            except Exception:
+                order_params = {
+                    'symbol': self.current_symbol,
+                    'type': 'limit',
+                    'side': 'sell',
+                    'amount': float(amount),
+                    'price': float(self.stop_price)
+                }
+                success, order_id = self.execute_order('sell', order_params)
+            except ccxt.InvalidOrder:
                 # Fallback a market order
-                order = self._execute_with_retry(
-                    self.exchange.create_order,
-                    symbol=self.current_symbol,
-                    type='market',
-                    side='sell',
-                    amount=float(amount),
-                    params={'timeout': ORDER_TIMEOUT}
-                )
-                logger.warning(f"VENTA MERCADO | {order['id']}")
+                order_params = {
+                    'symbol': self.current_symbol,
+                    'type': 'market',
+                    'side': 'sell',
+                    'amount': float(amount)
+                }
+                success, order_id = self.execute_order('sell', order_params)
             
-            # Calcular ganancias/pérdidas
-            ticker = self._safe_get_ticker(self.current_symbol)
-            if ticker:
+            # Actualizar capital
+            if success:
+                ticker = exchange_client.client.fetch_ticker(self.current_symbol)
                 current_price = Decimal(str(ticker['bid']))
                 profit = (current_price - self.entry_price) * self.position_size
                 self.current_capital += profit
-                logger.info(f"Resultado operación: {profit:.2f} EUR | Capital actual: {self.current_capital:.2f} EUR")
+                logger.info(f"Resultado operación: {profit:.2f}€ | Capital: {self.current_capital:.2f}€")
+                self._reset_state()
             
-            # Resetear estado
-            self._reset_trading_state()
-            return True, order['id']
+            return success, order_id
+            
         except Exception as e:
             logger.critical(f"Error en venta: {str(e)}", exc_info=True)
-            return False, f"Error en venta: {str(e)}"
-
-    def manage_orders(self):
-        """Gestiona stops y toma de ganancias"""
-        logger.info("Iniciando gestión de órdenes")
-        
-        while not self._shutdown_event.is_set():
-            try:
-                with self._lock:
-                    if not self.active_position:
-                        time.sleep(10)
-                        continue
-                    
-                    # Verificar timeout de orden
-                    if self.last_update and (datetime.now() - self.last_update) > timedelta(minutes=30):
-                        logger.warning("Timeout de posición, cerrando...")
-                        self.execute_sell()
-                        continue
-                    
-                    ticker = self._safe_get_ticker(self.current_symbol)
-                    if not ticker:
-                        time.sleep(60)
-                        continue
-                        
-                    current_price = Decimal(str(ticker['bid']))
-                    
-                    # Verificar stop loss
-                    if current_price <= self.stop_price:
-                        logger.info("Stop loss activado")
-                        self.execute_sell()
-                        continue
-                    
-                    # Verificar take profit
-                    if self.take_profit and current_price >= self.take_profit:
-                        logger.info("Take profit activado")
-                        self.execute_sell()
-                        continue
-                    
-                    # Ajustar trailing stop
-                    new_stop = current_price * (1 - Decimal(str(DEFAULT_TRAILING)))
-                    if new_stop > self.stop_price:
-                        self.stop_price = new_stop
-                        self.last_update = datetime.now()
-                        logger.debug(f"Nuevo stop: {self.stop_price:.8f}")
-                
-                time.sleep(60)  # Verificar cada minuto
-            except Exception as e:
-                logger.error(f"Error en gestión de órdenes: {str(e)}")
-                time.sleep(300)
+            return False, str(e)
 
     def shutdown(self):
-        """Apagado seguro del bot"""
-        logger.info("Iniciando apagado...")
+        """Protocolo profesional de apagado"""
+        logger.info("Iniciando secuencia de apagado...")
         self._shutdown_event.set()
         
         if self.active_position:
             success, msg = self.execute_sell()
             if not success:
-                logger.error(f"No se pudo cerrar posición: {msg}")
+                logger.error(f"Error liquidando posición: {msg}")
         
-        logger.info("Bot detenido correctamente")
+        logger.info("Motor detenido correctamente")
 
 # =============================================
-# ENDPOINTS API WEB
+# ENDPOINTS API (PRODUCCIÓN GRADE)
 # =============================================
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Endpoint de verificación de salud"""
+    """Endpoint de salud profesional"""
     return jsonify({
-        "status": "running",
-        "timestamp": datetime.now().isoformat(),
-        "position_active": bot.active_position,
-        "symbol": bot.current_symbol,
-        "current_capital": float(bot.current_capital)
+        "status": "operacional",
+        "timestamp": time.time(),
+        "position_active": trading_engine.active_position,
+        "current_capital": float(trading_engine.current_capital),
+        "environment": os.getenv("ENV", "production")
     }), 200
 
 @app.route('/webhook', methods=['POST'])
 @validate_webhook
-def handle_webhook():
-    """Endpoint principal para trading"""
+def handle_signal():
+    """Manejador profesional de señales de trading"""
+    data = request.get_json()
+    action = data['action'].lower()
+    symbol = data['symbol'].upper().replace('-', '/')
+    
     try:
-        data = request.get_json()
-        symbol = data['symbol'].upper().replace('-', '/')
-        
-        if data['action'].lower() == 'buy':
-            trailing = float(data.get('trailing_stop', DEFAULT_TRAILING))
-            take_profit = float(data.get('take_profit')) if 'take_profit' in data else None
-            
-            success, response = bot.execute_buy(
-                symbol,
-                trailing_percent=trailing,
-                take_profit=take_profit
-            )
-            
-            if success:
-                Thread(
-                    target=bot.manage_orders,
-                    daemon=True,
-                    name=f"OrderManager-{symbol}"
-                ).start()
-                
-                return jsonify({
-                    "status": "success",
-                    "order_id": response,
-                    "symbol": symbol,
-                    "trailing_stop": trailing,
-                    "take_profit": take_profit,
-                    "current_capital": float(bot.current_capital)
-                }), 200
-                
-            return jsonify({"error": response}), 400
-            
-        elif data['action'].lower() == 'sell':
-            success, response = bot.execute_sell()
+        if action == 'buy':
+            trailing = float(data.get('trailing_stop', 0.02))
+            success, order_id = trading_engine.execute_buy(symbol, trailing)
+            status_code = 200 if success else 400
             return jsonify({
                 "status": "success" if success else "error",
-                "message": response,
-                "current_capital": float(bot.current_capital)
+                "order_id": order_id,
+                "details": {
+                    "symbol": symbol,
+                    "trailing_stop": trailing,
+                    "capital": float(trading_engine.current_capital)
+                }
+            }), status_code
+            
+        elif action == 'sell':
+            success, order_id = trading_engine.execute_sell()
+            return jsonify({
+                "status": "success" if success else "error",
+                "order_id": order_id
             }), 200 if success else 400
             
         return jsonify({"error": "Acción no soportada"}), 400
+        
     except Exception as e:
         logger.error(f"Error en webhook: {str(e)}", exc_info=True)
-        return jsonify({"error": "Error interno del servidor"}), 500
+        return jsonify({
+            "error": "Error interno del servidor",
+            "details": str(e)
+        }), 500
 
 # =============================================
-# INICIALIZACIÓN Y EJECUCIÓN
+# INICIALIZACIÓN Y SERVICIO WEB
 # =============================================
-def run_server():
-    """Inicia el servidor de producción"""
+def run_production_server():
+    """Servidor web profesional para producción"""
     from waitress import serve
     
-    port = int(os.getenv("PORT", 3000))
-    workers = int(os.getenv("WORKERS", 4))
-    
-    logger.info(f"Iniciando servidor en puerto {port} con {workers} workers")
-    
+    logger.info(f"Iniciando servidor en puerto {config.WEB_SERVER_PORT}")
     serve(
         app,
         host="0.0.0.0",
-        port=port,
-        threads=workers,
-        channel_timeout=60
+        port=config.WEB_SERVER_PORT,
+        threads=os.cpu_count() or 4,
+        channel_timeout=120
     )
 
-# Instancia global del bot
+# Instancia global con seguridad
 try:
-    bot = TradingBot()
-    atexit.register(bot.shutdown)
+    trading_engine = TradingEngine()
+    atexit.register(trading_engine.shutdown)
 except Exception as e:
-    logger.critical(f"Error inicializando bot: {str(e)}")
+    logger.critical(f"Error de inicialización: {str(e)}")
     raise SystemExit(1)
 
 if __name__ == '__main__':
-    print("""
-    ====================================
-    🚀 TRADING BOT - VERSIÓN CORREGIDA
-    ====================================
-    Cambios implementados:
-    1. Sincronización de tiempo con Kraken
-    2. Generador de nonce robusto
-    3. Validación mejorada de entorno
-    ====================================
-    """)
-    run_server()
+    print("\n" + "="*50)
+    print("🚀 SERVICIO DE TRADING AUTOMATIZADO - PRODUCCIÓN")
+    print(f"• Endpoint: http://0.0.0.0:{config.WEB_SERVER_PORT}")
+    print(f"• Entorno: {os.getenv('ENV', 'production')}")
+    print("="*50 + "\n")
+    
+    run_production_server()

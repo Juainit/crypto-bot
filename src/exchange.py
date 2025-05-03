@@ -1,116 +1,120 @@
 import ccxt
 import logging
+import time
 from typing import Dict, Optional
-from .config import Config
+from decimal import Decimal
+from config import config  # Importamos la configuración centralizada
 
 class ExchangeClient:
     """
-    Production-grade Kraken exchange client with:
-    - Automatic rate limiting
-    - Connection resiliency
-    - Fee-aware calculations
+    Cliente de intercambio robusto para Kraken con:
+    - Manejo avanzado de nonce
+    - Sincronización horaria
+    - Reintentos automáticos
     """
-
+    
     def __init__(self):
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.client = self._initialize_client()
         self.markets = self._load_markets()
-
+        
     def _initialize_client(self) -> ccxt.kraken:
-        """Configure and validate the exchange connection"""
+        """Configuración segura del cliente de intercambio"""
+        exchange = ccxt.kraken({
+            'apiKey': config.KRAKEN_API_KEY,
+            'secret': config.KRAKEN_SECRET,
+            'enableRateLimit': True,
+            'options': {
+                'adjustForTimeDifference': True,
+                'recvWindow': 10000
+            },
+            'nonce': self._create_nonce_generator()  # Generador robusto
+        })
+        
+        self._sync_exchange_time(exchange)  # Sincronización inicial
+        return exchange
+
+    def _create_nonce_generator(self):
+        """Generador de nonce inmune a desincronización temporal"""
+        last_nonce = int(time.time() * 1000)
+        
+        def generator():
+            nonlocal last_nonce
+            current = int(time.time() * 1000)
+            last_nonce = current if current > last_nonce else last_nonce + 1
+            return last_nonce
+            
+        return generator
+
+    def _sync_exchange_time(self, client: ccxt.kraken):
+        """Sincronización horaria con el servidor de Kraken"""
         try:
-            kraken = ccxt.kraken({
-                'apiKey': Config.KRAKEN_API_KEY,
-                'secret': Config.KRAKEN_SECRET,
-                'enableRateLimit': True,  # Critical for production
-                'options': {
-                    'adjustForTimeDifference': True,
-                    'defaultType': 'spot'
-                }
-            })
-            
-            # Test connectivity
-            kraken.check_required_credentials()
-            return kraken
-            
+            server_time = client.fetch_time()
+            local_time = int(time.time() * 1000)
+            delta = server_time - local_time
+            if abs(delta) > 1000:  # 1 segundo de diferencia
+                self.logger.warning(f"Desincronía temporal detectada: {delta}ms")
         except Exception as e:
-            self.logger.critical(f"Kraken initialization failed: {str(e)}")
+            self.logger.error(f"Error sincronizando tiempo: {str(e)}")
             raise
 
-    def _load_markets(self) -> Dict:
-        """Load and cache market data with retries"""
-        max_retries = 3
-        for attempt in range(max_retries):
+    def _load_markets(self):
+        """Carga los mercados disponibles con reintentos"""
+        for attempt in range(3):
             try:
                 markets = self.client.load_markets()
-                self.logger.info(f"Loaded {len(markets)} trading pairs")
+                self.logger.info(f"Mercados cargados ({len(markets)} pares)")
                 return markets
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    self.logger.error("Failed to load markets after retries")
+            except ccxt.NetworkError as e:
+                if attempt == 2:
                     raise
-                self.logger.warning(f"Market load failed (attempt {attempt+1}): {str(e)}")
-                time.sleep(2 ** attempt)  # Exponential backoff
+                time.sleep(1.5 ** attempt)
 
     def get_balance(self) -> Dict:
-        """Get account balance with error handling"""
+        """Obtiene balance con manejo profesional de errores"""
         try:
-            return self.client.fetch_balance()
+            balance = self.client.fetch_balance()
+            return {
+                'free': balance['free'],
+                'used': balance['used'],
+                'total': balance['total']
+            }
         except ccxt.NetworkError as e:
-            self.logger.error(f"Network error fetching balance: {str(e)}")
+            self.logger.error(f"Error de red: {str(e)}")
             raise
         except ccxt.ExchangeError as e:
-            self.logger.error(f"Exchange error fetching balance: {str(e)}")
+            self.logger.error(f"Error del exchange: {str(e)}")
             raise
 
     def create_order(self, order_params: Dict) -> Optional[Dict]:
         """
-        Create order with production safeguards:
-        - Validates minimum order size (10€)
-        - Includes fee calculation
-        - Implements retry logic
+        Crea órdenes con validación de tamaño mínimo y gestión de tarifas
         """
         try:
-            # Validate minimum order size
-            if 'amount' in order_params and 'price' in order_params:
-                order_value = order_params['amount'] * order_params['price']
-                if order_value < Config.MIN_ORDER_SIZE:
-                    self.logger.warning(f"Order value {order_value}€ below minimum {Config.MIN_ORDER_SIZE}€")
-                    return None
+            # Validación avanzada del tamaño de orden
+            market = self.client.market(order_params['symbol'])
+            min_amount = Decimal(str(market['limits']['amount']['min']))
+            
+            if Decimal(str(order_params['amount'])) < min_amount:
+                self.logger.warning(
+                    f"Orden muy pequeña: {order_params['amount']} < {min_amount}"
+                )
+                return None
 
-            # Add calculated fees to order metadata
-            order_params['params'] = {
-                'fee': self.calculate_fees(order_params.get('amount', 0))
-            }
+            # Sincronización previa a la operación
+            self._sync_exchange_time(self.client)
             
             return self.client.create_order(**order_params)
             
-        except ccxt.InsufficientFunds as e:
-            self.logger.error(f"Insufficient funds: {str(e)}")
+        except ccxt.InvalidNonce as e:
+            self.logger.critical(f"Error de nonce: {str(e)}")
             raise
-        except ccxt.InvalidOrder as e:
-            self.logger.error(f"Invalid order: {str(e)}")
-            raise
+        except ccxt.NetworkError as e:
+            self.logger.error(f"Error de red: {str(e)}")
+            return None
         except Exception as e:
-            self.logger.error(f"Order creation failed: {str(e)}")
+            self.logger.error(f"Error inesperado: {str(e)}", exc_info=True)
             raise
 
-    def get_ticker(self, symbol: str) -> Dict:
-        """Get ticker data with symbol validation"""
-        try:
-            normalized_symbol = symbol.replace('EUR', '/EUR') if 'EUR' in symbol and '/' not in symbol else symbol
-            if normalized_symbol not in self.markets:
-                raise ValueError(f"Invalid symbol. Available pairs: {list(self.markets.keys())}")
-            return self.client.fetch_ticker(normalized_symbol)
-        except Exception as e:
-            self.logger.error(f"Ticker fetch failed for {symbol}: {str(e)}")
-            raise
-
-    def calculate_fees(self, amount: float) -> float:
-        """Calculate fees including exchange minimums"""
-        fee = amount * Config.FEE_RATE
-        return max(fee, 0.01)  # Kraken's minimum fee
-
-
-# Singleton pattern for shared instance
+# Instancia preconfigurada para uso global
 exchange_client = ExchangeClient()
