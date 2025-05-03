@@ -56,20 +56,21 @@ class DatabaseManager:
             logger.critical(f"Error inicializando pool: {str(e)}")
             raise
 
-    def _test_connection(self) -> None:
-    retries = 3
-    for attempt in range(retries):
-        try:
-            conn = self.get_connection()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:  # ← Añade esto
-                cur.execute("SELECT 1 AS test")
-                result = cur.fetchone()
-                if result['test'] != 1:  # Ahora funciona
-                    raise ValueError("Test query fallida")
-            logger.info("Conexión a PostgreSQL verificada")
-            self.release_connection(conn)
-            return
-        except Exception as e:
+    def _test_connection(self) -> None:  # Línea 59
+        """Verificación profesional de conexión inicial"""
+        retries = 3  # ← Ahora SÍ está indentado
+        for attempt in range(retries):
+            try:
+                conn = self.get_connection()
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT 1 AS test")
+                    result = cur.fetchone()
+                    if result['test'] != 1:
+                        raise ValueError("Test query fallida")
+                logger.info("Conexión a PostgreSQL verificada")
+                self.release_connection(conn)
+                return
+            except Exception as e:
                 if attempt == retries - 1:
                     logger.error(f"Fallo conexión BD después de {retries} intentos")
                     raise
