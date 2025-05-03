@@ -3,7 +3,7 @@ import logging
 import time
 from typing import Dict, Optional
 from decimal import Decimal
-from config import config  # Importamos la configuración centralizada
+from src.config import config  # Importamos la configuración centralizada
 
 class ExchangeClient:
     """

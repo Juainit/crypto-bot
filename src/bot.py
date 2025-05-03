@@ -9,7 +9,7 @@ from functools import wraps
 
 import ccxt
 from flask import Flask, request, jsonify
-from config import config
+from src.config import config
 from exchange import exchange_client
 
 # =============================================

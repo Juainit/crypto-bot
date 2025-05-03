@@ -9,7 +9,7 @@ from typing import Dict, Optional, Tuple
 
 from flask import Flask, request, jsonify
 import ccxt
-from config import config
+from src.config import config
 from exchange import exchange_client  # Cliente de exchange corregido
 
 # =============================================
