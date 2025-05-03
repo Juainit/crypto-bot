@@ -322,7 +322,7 @@ def handle_signal():
 # =============================================
 # INICIALIZACIÓN Y SERVICIO WEB
 # =============================================
-def run_production_server():
+def run_server():
     """Servidor web profesional para producción"""
     from waitress import serve
     
@@ -350,4 +350,4 @@ if __name__ == '__main__':
     print(f"• Entorno: {os.getenv('ENV', 'production')}")
     print("="*50 + "\n")
     
-    run_production_server()
+    run_server()
