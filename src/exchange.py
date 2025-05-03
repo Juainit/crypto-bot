@@ -1,120 +1,109 @@
+# exchange.py
 import ccxt
-import logging
 import time
-from typing import Dict, Optional
-from decimal import Decimal
-from src.config import config  # Importamos la configuración centralizada
+import logging
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger("ExchangeClient")
 
 class ExchangeClient:
-    """
-    Cliente de intercambio robusto para Kraken con:
-    - Manejo avanzado de nonce
-    - Sincronización horaria
-    - Reintentos automáticos
+    """Cliente mejorado para Kraken con:
+    - Sincronización temporal automática
+    - Manejo robusto de errores
+    - Logging detallado
     """
     
     def __init__(self):
-        self.logger = logging.getLogger(self.__class__.__name__)
         self.client = self._initialize_client()
-        self.markets = self._load_markets()
+        self._last_sync = 0
         
     def _initialize_client(self) -> ccxt.kraken:
-        """Configuración segura del cliente de intercambio"""
-        exchange = ccxt.kraken({
-            'apiKey': config.KRAKEN_API_KEY,
-            'secret': config.KRAKEN_SECRET,
-            'enableRateLimit': True,
-            'options': {
-                'adjustForTimeDifference': True,
-                'recvWindow': 10000
-            },
-            'nonce': self._create_nonce_generator()  # Generador robusto
-        })
-        
-        self._sync_exchange_time(exchange)  # Sincronización inicial
-        return exchange
-
-    def _create_nonce_generator(self):
-        """Generador de nonce inmune a desincronización temporal"""
-        last_nonce = int(time.time() * 1000)
-        
-        def generator():
-            nonlocal last_nonce
-            current = int(time.time() * 1000)
-            last_nonce = current if current > last_nonce else last_nonce + 1
-            return last_nonce
+        """Configuración segura del cliente con validación de credenciales"""
+        try:
+            exchange = ccxt.kraken({
+                'apiKey': os.getenv("KRAKEN_API_KEY"),
+                'secret': os.getenv("KRAKEN_SECRET"),
+                'enableRateLimit': True,
+                'options': {
+                    'adjustForTimeDifference': True,
+                    'recvWindow': 15000  # 15 seg timeout
+                },
+                'nonce': self._nonce_generator()
+            })
             
-        return generator
+            self._force_time_sync(exchange)
+            logger.info("Cliente Kraken inicializado | Server: %s", exchange.urls['api']['public'])
+            return exchange
+            
+        except ccxt.AuthenticationError as e:
+            logger.critical("Error de autenticación en Kraken. Verifica las API keys [4]")
+            raise SystemExit(1) from e
 
-    def _sync_exchange_time(self, client: ccxt.kraken):
-        """Sincronización horaria con el servidor de Kraken"""
+    def _nonce_generator(self):
+        """Generador de nonce a prueba de colisiones [5]"""
+        last_nonce = int(time.time() * 1000)
+        while True:
+            current_time = int(time.time() * 1000)
+            last_nonce = max(last_nonce + 1, current_time)
+            yield last_nonce
+
+    def _force_time_sync(self, client: ccxt.kraken):
+        """Sincronización horaria estricta con Kraken [5]"""
         try:
             server_time = client.fetch_time()
             local_time = int(time.time() * 1000)
-            delta = server_time - local_time
-            if abs(delta) > 1000:  # 1 segundo de diferencia
-                self.logger.warning(f"Desincronía temporal detectada: {delta}ms")
-        except Exception as e:
-            self.logger.error(f"Error sincronizando tiempo: {str(e)}")
-            raise
-
-    def _load_markets(self):
-        """Carga los mercados disponibles con reintentos"""
-        for attempt in range(3):
-            try:
-                markets = self.client.load_markets()
-                self.logger.info(f"Mercados cargados ({len(markets)} pares)")
-                return markets
-            except ccxt.NetworkError as e:
-                if attempt == 2:
-                    raise
-                time.sleep(1.5 ** attempt)
-
-    def get_balance(self) -> Dict:
-        """Obtiene balance con manejo profesional de errores"""
-        try:
-            balance = self.client.fetch_balance()
-            return {
-                'free': balance['free'],
-                'used': balance['used'],
-                'total': balance['total']
-            }
+            self.time_delta = server_time - local_time
+            logger.debug("Sincronización horaria | Diferencia: %dms", self.time_delta)
+            
+            if abs(self.time_delta) > 5000:  # 5 seg diferencia
+                logger.warning("Gran desincronía temporal con Kraken")
+                
         except ccxt.NetworkError as e:
-            self.logger.error(f"Error de red: {str(e)}")
-            raise
-        except ccxt.ExchangeError as e:
-            self.logger.error(f"Error del exchange: {str(e)}")
+            logger.error("Fallo sincronización: %s", str(e))
             raise
 
-    def create_order(self, order_params: Dict) -> Optional[Dict]:
-        """
-        Crea órdenes con validación de tamaño mínimo y gestión de tarifas
-        """
+    def create_order(self, symbol: str, order_type: str, side: str, amount: float, price: float, params: Dict) -> Optional[Dict]:
+        """Ejecuta órdenes con manejo profesional de errores"""
         try:
-            # Validación avanzada del tamaño de orden
-            market = self.client.market(order_params['symbol'])
-            min_amount = Decimal(str(market['limits']['amount']['min']))
+            # Resincronizar cada 5 min [5]
+            if (time.time() - self._last_sync) > 300:
+                self._force_time_sync(self.client)
+                self._last_sync = time.time()
+                
+            logger.info("Enviando orden: %s %s %s @ %s", symbol, order_type.upper(), side.upper(), price)
             
-            if Decimal(str(order_params['amount'])) < min_amount:
-                self.logger.warning(
-                    f"Orden muy pequeña: {order_params['amount']} < {min_amount}"
-                )
-                return None
-
-            # Sincronización previa a la operación
-            self._sync_exchange_time(self.client)
+            order = self.client.create_order(
+                symbol=symbol,
+                type=order_type,
+                side=side,
+                amount=amount,
+                price=price,
+                params=params
+            )
             
-            return self.client.create_order(**order_params)
+            logger.debug("Respuesta Kraken: %s", order)
+            self._validate_order_response(order)
+            return order
             
-        except ccxt.InvalidNonce as e:
-            self.logger.critical(f"Error de nonce: {str(e)}")
+        except ccxt.InsufficientFunds as e:
+            logger.error("Fondos insuficientes: %s", str(e))
             raise
         except ccxt.NetworkError as e:
-            self.logger.error(f"Error de red: {str(e)}")
-            return None
+            logger.error("Error de red: %s", str(e))
+            raise
         except Exception as e:
-            self.logger.error(f"Error inesperado: {str(e)}", exc_info=True)
+            logger.critical("Error inesperado: %s", str(e), exc_info=True)
             raise
 
-# Instancia preconfigurada para uso global
+    def _validate_order_response(self, response: Dict):
+        """Validación profesional de respuestas [7]"""
+        required_fields = ['id', 'status', 'filled']
+        for field in required_fields:
+            if field not in response:
+                raise ValueError(f"Respuesta inválida de Kraken. Falta campo: {field}")
+                
+        if response['status'] not in ['closed', 'open']:
+            raise ValueError(f"Estado de orden no reconocido: {response['status']}")
+
+# Instancia global preconfigurada
 exchange_client = ExchangeClient()

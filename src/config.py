@@ -1,91 +1,100 @@
+# config.py
 import os
 import logging
 from typing import Optional
 
+logger = logging.getLogger("Config")
+
 class Config:
     """
-    Clase de configuración robusta para producción con:
-    - Validación de variables obligatorias
-    - Manejo seguro de secrets
-    - Tipado estático
+    Configuración profesional para entornos de producción con:
+    - Validación estricta de variables
+    - Enmascaramiento de datos sensibles
+    - Soporte para PostgreSQL y Kraken
     """
     
-    def __init__(self, debug_mode: bool = False):
-        self._logger = logging.getLogger(self.__class__.__name__)
-        self._debug_mode = debug_mode
-        
-        # Cargar variables inmediatamente
+    def __init__(self):
         self._validate_core()
-        
-        if debug_mode:
-            self._log_config_state()
+        self._log_config_state()
 
     def _validate_core(self) -> None:
-        """Valida variables obligatorias"""
-        if not all([self.KRAKEN_API_KEY, self.KRAKEN_SECRET]):
-            self._logger.critical("Faltan credenciales de Kraken")
+        """Valida variables críticas para producción"""
+        missing = []
+        if not self.KRAKEN_API_KEY:
+            missing.append("KRAKEN_API_KEY")
+        if not self.KRAKEN_SECRET:
+            missing.append("KRAKEN_SECRET")
+        if not self.DATABASE_URL:
+            missing.append("DATABASE_URL")
+        
+        if missing:
+            logger.critical("Variables faltantes: %s", ", ".join(missing))
             raise EnvironmentError("Configuración incompleta")
 
     @property
     def KRAKEN_API_KEY(self) -> str:
         """API Key de Kraken (requerida)"""
-        key = os.getenv("KRAKEN_API_KEY")
-        if not key:
-            raise ValueError("KRAKEN_API_KEY no configurada")
-        return key
+        return os.getenv("KRAKEN_API_KEY", "")
 
     @property
     def KRAKEN_SECRET(self) -> str:
         """API Secret de Kraken (requerida)"""
-        secret = os.getenv("KRAKEN_SECRET")
-        if not secret:
-            raise ValueError("KRAKEN_SECRET no configurada")
-        return secret
+        return os.getenv("KRAKEN_SECRET", "")
+
+    @property
+    def DATABASE_URL(self) -> str:
+        """URL de PostgreSQL (prioriza conexión interna en producción)"""
+        if self.IS_PRODUCTION:
+            return os.getenv("PRIVATE_DATABASE_URL", "")  # URL interna
+        return os.getenv("PUBLIC_DATABASE_URL", "")  # URL pública
 
     @property
     def WEB_SERVER_PORT(self) -> int:
-        """Puerto del servidor web (opcional)"""
-        try:
+        """Puerto HTTP (usa variable PORT en producción)"""
+        if self.IS_PRODUCTION:
             return int(os.getenv("PORT", "3000"))
-        except ValueError:
-            self._logger.warning("PORT inválido, usando 3000")
-            return 3000
+        return int(os.getenv("WEB_SERVER_PORT", "3000"))
 
     @property
     def INITIAL_CAPITAL(self) -> float:
-        """Capital inicial en EUR (opcional)"""
+        """Capital inicial en EUR (valor seguro por defecto)"""
         try:
             return float(os.getenv("INITIAL_CAPITAL", "40.0"))
         except ValueError:
-            self._logger.warning("INITIAL_CAPITAL inválido, usando 40.0")
+            logger.warning("INITIAL_CAPITAL inválido, usando 40.0")
             return 40.0
 
     @property
-    def DEBUG_MODE(self) -> bool:
-        """Modo desarrollo (no usar en producción)"""
-        return self._debug_mode
+    def IS_PRODUCTION(self) -> bool:
+        """Detecta entorno de producción (Railway)"""
+        return bool(os.getenv("RAILWAY_ENVIRONMENT"))
+
+    @property
+    def SSL_DATABASE(self) -> bool:
+        """Habilita SSL para PostgreSQL en producción"""
+        return self.IS_PRODUCTION
+
+    def _redact_key(self, key: str) -> Optional[str]:
+        """Enmascara datos sensibles para logging"""
+        if not key:
+            return None
+        return f"{key[:2]}***{key[-2:]}" if len(key) > 4 else "****"
 
     def _log_config_state(self) -> None:
-        """Log seguro con información sensible enmascarada"""
+        """Log seguro de configuración inicial"""
         debug_info = {
             'KRAKEN_API_KEY': self._redact_key(self.KRAKEN_API_KEY),
             'KRAKEN_SECRET': '*****' if self.KRAKEN_SECRET else None,
-            'WEB_SERVER_PORT': self.WEB_SERVER_PORT,
+            'DATABASE_HOST': self.DATABASE_URL.split('@')[-1].split('/')[0] if self.DATABASE_URL else None,
+            'WEB_PORT': self.WEB_SERVER_PORT,
             'INITIAL_CAPITAL': self.INITIAL_CAPITAL,
-            'DEBUG_MODE': self.DEBUG_MODE
+            'MODO': "PRODUCCIÓN" if self.IS_PRODUCTION else "DESARROLLO"
         }
-        self._logger.debug("Configuración activa: %s", debug_info)
+        logger.info("Configuración activa: %s", debug_info)
 
-    @staticmethod
-    def _redact_key(key: str) -> Optional[str]:
-        """Enmascara parcialmente API keys"""
-        if not key:
-            return None
-        return f"{key[:4]}...{key[-2:]}" if len(key) > 6 else "****"
-
-# Inicialización segura para producción
+# Inicialización segura
 try:
-    config = Config(debug_mode=os.getenv("DEBUG_MODE", "false").lower() == "true")
+    config = Config()
 except Exception as e:
-    logging.critical(f"Error fatal en configuración: {str(e)}")
+    logger.critical("Error fatal en configuración: %s", str(e))
     raise
