@@ -394,7 +394,7 @@ def handle_webhook():
         symbol = data['symbol'].upper().replace('-', '/')
         
         if data['action'].lower() == 'buy':
-            trailing = float(data.get('trailing_stop',_TRAILING))
+            trailing = float(data.get('trailing_stop', DEFAULT_TRAILING))
             take_profit = float(data.get('take_profit')) if 'take_profit' in data else None
             
             success, response = bot.execute_buy(
