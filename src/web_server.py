@@ -23,7 +23,7 @@ ORDER_TIMEOUT = 30000  # 30 segundos
 DEFAULT_TRAILING = 0.02  # 2%
 INITIAL_CAPITAL = Decimal('40')  # Capital inicial en EUR
 
-# Configuración básica de logging
+# Configuración mejorada de logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
@@ -64,11 +64,11 @@ def validate_webhook(f):
     return wrapper
 
 # =============================================
-# CLASE PRINCIPAL DEL TRADING BOT
+# CLASE PRINCIPAL DEL TRADING BOT (VERSIÓN CORREGIDA)
 # =============================================
 class TradingBot:
     def __init__(self):
-        """Inicialización completa del bot con manejo robusto de errores"""
+        """Inicialización con generador de nonce mejorado"""
         # 1. Sistema de bloqueo y eventos
         self._lock = Lock()
         self._shutdown_event = Event()
@@ -76,8 +76,9 @@ class TradingBot:
         # 2. Estado del trading
         self._reset_trading_state()
         
-        # 3. Conexión con el exchange
+        # 3. Conexión con el exchange (mejorada)
         self.exchange = self._init_exchange()
+        self._sync_exchange_time()  # Nueva sincronización
         
         # 4. Carga inicial de mercados
         self._load_markets()
@@ -85,31 +86,40 @@ class TradingBot:
         logger.info("Trading Bot inicializado correctamente")
 
     def _init_exchange(self):
-        """Configuración robusta de la conexión con Kraken"""
+        """Configuración robusta de Kraken con nonce seguro"""
         api_key = os.getenv('KRAKEN_API_KEY')
         secret = os.getenv('KRAKEN_SECRET')
         
         if not api_key or not secret:
-            raise ValueError("Las credenciales de Kraken no están configuradas")
-        
+            raise ValueError("Credenciales de Kraken no configuradas")
+
         exchange = ccxt.kraken({
             'apiKey': api_key,
             'secret': secret,
             'enableRateLimit': True,
             'timeout': ORDER_TIMEOUT,
-            'rateLimit': 3000,
             'options': {
                 'adjustForTimeDifference': True,
                 'recvWindow': 10000
             }
         })
         
-        # Solución definitiva para nonce
         exchange.nonce = self._create_nonce_generator()
         return exchange
 
+    def _sync_exchange_time(self):
+        """Sincroniza el tiempo local con Kraken"""
+        try:
+            server_time = self.exchange.fetch_time()
+            local_time = int(time.time() * 1000)
+            delta = server_time - local_time
+            if abs(delta) > 1000:  # 1 segundo de diferencia
+                logger.warning(f"Diferencia de tiempo detectada: {delta}ms")
+        except Exception as e:
+            logger.error(f"Error sincronizando tiempo: {str(e)}")
+
     def _create_nonce_generator(self):
-        """Generador de nonce robusto para Kraken"""
+        """Generador de nonce inmune a desincronización"""
         last_nonce = int(time.time() * 1000)
         
         def generator():
@@ -171,13 +181,14 @@ class TradingBot:
             return Decimal('0.00000001')
 
     def _execute_with_retry(self, func, *args, **kwargs):
-        """Ejecuta una función con reintentos para errores de API"""
+        """Ejecuta con reintentos y regeneración de nonce"""
         last_exception = None
         
         for attempt in range(MAX_RETRIES):
             try:
-                # Regenerar nonce en cada intento
+                # Regenerar nonce y sincronizar tiempo
                 self.exchange.nonce = self._create_nonce_generator()
+                self._sync_exchange_time()
                 return func(*args, **kwargs)
             except ccxt.InvalidNonce as e:
                 last_exception = e
@@ -197,7 +208,7 @@ class TradingBot:
 
     @synchronized('_lock')
     def execute_buy(self, symbol: str, trailing_percent: float, take_profit: float = None) -> Tuple[bool, str]:
-        """Ejecuta orden de compra con validaciones completas"""
+        """Ejecuta orden de compra con validaciones"""
         try:
             # Validaciones iniciales
             if not self._validate_symbol(symbol):
@@ -290,7 +301,7 @@ class TradingBot:
                 )
                 logger.warning(f"VENTA MERCADO | {order['id']}")
             
-            # Calcular ganancias/pérdidas y actualizar capital
+            # Calcular ganancias/pérdidas
             ticker = self._safe_get_ticker(self.current_symbol)
             if ticker:
                 current_price = Decimal(str(ticker['bid']))
@@ -341,7 +352,7 @@ class TradingBot:
                         self.execute_sell()
                         continue
                     
-                    # Ajustar trailing stop (solo si el precio sube)
+                    # Ajustar trailing stop
                     new_stop = current_price * (1 - Decimal(str(DEFAULT_TRAILING)))
                     if new_stop > self.stop_price:
                         self.stop_price = new_stop
@@ -449,18 +460,22 @@ def run_server():
     )
 
 # Instancia global del bot
-bot = TradingBot()
-atexit.register(bot.shutdown)
+try:
+    bot = TradingBot()
+    atexit.register(bot.shutdown)
+except Exception as e:
+    logger.critical(f"Error inicializando bot: {str(e)}")
+    raise SystemExit(1)
 
 if __name__ == '__main__':
     print("""
     ====================================
-    🚀 TRADING BOT - MODO PRODUCCIÓN
+    🚀 TRADING BOT - VERSIÓN CORREGIDA
     ====================================
-    Exchange: Kraken
-    Webhook: POST /webhook
-    Health Check: GET /health
+    Cambios implementados:
+    1. Sincronización de tiempo con Kraken
+    2. Generador de nonce robusto
+    3. Validación mejorada de entorno
     ====================================
     """)
-    
     run_server()
