@@ -1,4 +1,5 @@
 # exchange.py
+import os
 import ccxt
 import time
 import logging
