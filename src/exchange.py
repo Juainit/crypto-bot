@@ -2,10 +2,10 @@ import os
 import time
 import logging
 import ccxt
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 
 logger = logging.getLogger("KrakenBot")  
-logger.setLevel(logging.INFO)  # <-- Nivel crítico
+logger.setLevel(logging.INFO)
 
 # Configura un handler básico si no existe
 if not logger.handlers:
@@ -14,7 +14,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 class ExchangeClient:
-    """Cliente mejorado para Kraken con todos los métodos necesarios"""
+    """Cliente profesional para Kraken con manejo robusto de errores"""
     
     def __init__(self):
         self.client = self._initialize_client()
@@ -25,23 +25,26 @@ class ExchangeClient:
         """Configuración segura del cliente con validación de credenciales"""
         try:
             exchange = ccxt.kraken({
-                'apiKey': os.getenv("KRAKEN_API_KEY"),
-                'secret': os.getenv("KRAKEN_SECRET"),
+                'apiKey': os.getenv("KRAKEN_API_KEY", "").strip(),
+                'secret': os.getenv("KRAKEN_SECRET", "").strip(),
                 'enableRateLimit': True,
                 'options': {
                     'adjustForTimeDifference': True,
-                    'recvWindow': 15000  # 15 seg timeout
-                },
-                'nonce': self._nonce_generator()
+                    'recvWindow': 15000,
+                    'rateLimit': 3000
+                }
             })
-            
+            exchange.load_markets()  # Precarga los mercados
             self._force_time_sync(exchange)
             logger.info("Cliente Kraken inicializado | Server: %s", exchange.urls['api']['public'])
             return exchange
             
         except ccxt.AuthenticationError as e:
-            logger.critical("Error de autenticación en Kraken. Verifica las API keys")
+            logger.critical("Error de autenticación: Verifica las API keys")
             raise SystemExit(1) from e
+        except Exception as e:
+            logger.critical("Error inicializando cliente: %s", str(e))
+            raise
 
     def _nonce_generator(self):
         """Generador de nonce a prueba de colisiones"""
@@ -72,53 +75,92 @@ class ExchangeClient:
             logger.error("Error de red: %s", str(e))
             return False
             
-    def validate_symbol(self, symbol: str) -> dict:  # ← Ahora retorna dict (no bool)
-    try:
-        markets = self.client.load_markets()
-        normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
-        for market_id, market in markets.items():
-            if normalized_symbol == market.get('altname'):
-                return market  # ← Retorna el diccionario completo
-        logger.error(f"Símbolo {symbol} no encontrado en Kraken")
-        return None
-    except Exception as e:
-        logger.error(f"Error validando símbolo: {str(e)}")
-        return None
+    def validate_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Valida símbolo y devuelve datos del mercado"""
+        try:
+            markets = self.client.load_markets()
+            normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
+            
+            for market_id, market in markets.items():
+                if normalized_symbol == market.get('altname'):
+                    return {
+                        'id': market_id,
+                        'symbol': normalized_symbol,
+                        'limits': market.get('limits'),
+                        'precision': market.get('precision'),
+                        'active': market.get('active')
+                    }
+            
+            logger.error(f"Símbolo {symbol} no encontrado. Pares disponibles: {list(m['altname'] for m in markets.values())[:10]}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error validando símbolo: {str(e)}", exc_info=True)
+            return None
 
-    def fetch_ticker(self, symbol: str) -> dict:
-        normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
-        return self.client.fetch_ticker(normalized_symbol)
-    
+    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         """Obtiene datos de mercado para un símbolo"""
         try:
-            return self.client.fetch_ticker(symbol.upper().replace('-', '/'))
+            normalized_symbol = self._normalize_symbol(symbol)
+            return self.client.fetch_ticker(normalized_symbol)
         except ccxt.NetworkError as e:
             logger.error("Error obteniendo ticker: %s", str(e))
             raise
+        except Exception as e:
+            logger.error("Error inesperado en fetch_ticker: %s", str(e))
+            raise
 
-    def create_limit_order(self, symbol: str, side: str, amount: float, price: float) -> Dict:
-        """Crea una orden limitada"""
+    def create_limit_order(self, symbol: str, side: str, amount: float, price: float) -> Dict[str, Any]:
+        """Crea una orden limitada con validación mejorada"""
         try:
+            normalized_symbol = self._normalize_symbol(symbol)
             return self.client.create_limit_order(
-                symbol=symbol.upper().replace('-', '/'),
+                symbol=normalized_symbol,
                 side=side.lower(),
-                amount=amount,
-                price=price
+                amount=self._format_amount(amount, normalized_symbol),
+                price=self._format_price(price, normalized_symbol)
             )
         except ccxt.InvalidOrder as e:
             logger.error("Orden inválida: %s", str(e))
             raise
+        except Exception as e:
+            logger.error("Error inesperado en create_limit_order: %s", str(e))
+            raise
 
-    def create_market_order(self, symbol: str, side: str, amount: float) -> Dict:
-        """Crea una orden de mercado"""
+    def create_market_order(self, symbol: str, side: str, amount: float) -> Dict[str, Any]:
+        """Crea una orden de mercado con validación mejorada"""
         try:
+            normalized_symbol = self._normalize_symbol(symbol)
             return self.client.create_market_order(
-                symbol=symbol.upper().replace('-', '/'),
+                symbol=normalized_symbol,
                 side=side.lower(),
-                amount=amount
+                amount=self._format_amount(amount, normalized_symbol)
             )
         except ccxt.InsufficientFunds as e:
             logger.error("Fondos insuficientes: %s", str(e))
             raise
+        except Exception as e:
+            logger.error("Error inesperado en create_market_order: %s", str(e))
+            raise
 
-exchange_client = ExchangeClient()  # ¡Nota el nombre en minúsculas!        
+    def _normalize_symbol(self, symbol: str) -> str:
+        """Normaliza símbolos a formato Kraken (STEPEUR -> STEP/EUR)"""
+        symbol = symbol.upper().replace('-', '')
+        if len(symbol) > 3:  # Convierte STEPEUR -> STEP/EUR
+            return f"{symbol[:-3]}/{symbol[-3:]}"
+        return symbol
+
+    def _format_amount(self, amount: float, symbol: str) -> float:
+        """Ajusta cantidad a la precisión requerida por el par"""
+        market = self.client.market(symbol)
+        precision = market['precision']['amount']
+        return float(round(amount, precision))
+
+    def _format_price(self, price: float, symbol: str) -> float:
+        """Ajusta precio a la precisión requerida por el par"""
+        market = self.client.market(symbol)
+        precision = market['precision']['price']
+        return float(round(price, precision))
+
+# Instancia global para uso en otros módulos
+exchange_client = ExchangeClient()
