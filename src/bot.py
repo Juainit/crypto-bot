@@ -1,8 +1,9 @@
+# bot.py (Versión Profesional Corregida)
 import os
 import time
 import atexit
 import logging
-from decimal import Decimal, getcontext
+from decimal import Decimal, getcontext, ROUND_UP
 from typing import Dict, Optional, Tuple
 from threading import Thread, Lock, Event
 from functools import wraps
@@ -10,13 +11,14 @@ import ccxt
 from flask import Flask, request, jsonify
 from src.config import config
 from src.exchange import exchange_client
-from src.database import db_manager  # Nueva importación
+from src.database import db_manager
+from src.signals import signal_processor
 
 # =============================================
-# CONFIGURACIÓN GLOBAL MEJORADA
+# CONFIGURACIÓN GLOBAL
 # =============================================
 app = Flask(__name__)
-getcontext().prec = 10  # Mayor precisión para cálculos financieros
+getcontext().prec = 12  # Precisión para cálculos financieros
 
 # Configuración profesional de logging
 logging.basicConfig(
@@ -31,17 +33,18 @@ logging.basicConfig(
 logger = logging.getLogger('TradingEngine')
 
 # =============================================
-# MEJORAS EN DECORADORES Y HELPERS
+# DECORADORES MEJORADOS
 # =============================================
 def synchronized(lock_name: str):
-    """Decorador thread-safe mejorado con timeout"""
+    """Decorador thread-safe con timeout y registro"""
     def decorator(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             lock = getattr(self, lock_name)
-            if not lock.acquire(timeout=10):  # Timeout de 10 segundos
-                raise TimeoutError("No se pudo adquirir el lock")
             try:
+                if not lock.acquire(timeout=15):
+                    logger.error("Timeout adquiriendo lock")
+                    raise TimeoutError("No se pudo adquirir el recurso")
                 return func(self, *args, **kwargs)
             finally:
                 lock.release()
@@ -49,73 +52,63 @@ def synchronized(lock_name: str):
     return decorator
 
 def validate_webhook(f):
-    """Validador mejorado de webhooks con registro de auditoría"""
+    """Validador profesional de webhooks con auditoría"""
     @wraps(f)
     def wrapper(*args, **kwargs):
         start_time = time.time()
         client_ip = request.remote_addr
         
         try:
-            # Validación básica
             if not request.is_json:
                 logger.warning(f"Intento de webhook no JSON desde {client_ip}")
-                return jsonify({"error": "Content-Type debe ser application/json"}), 400
+                return jsonify({"error": "Se requiere application/json"}), 400
                 
             data = request.get_json()
-            logger.debug(f"Webhook recibido desde {client_ip}: {data}")
+            logger.info(f"Webhook recibido desde {client_ip}: {data}")
             
-            # Validación de campos
+            # Validación de campos esenciales
             required = {'action', 'symbol'}
-            missing = required - set(data.keys())
-            if missing:
+            if missing := required - set(data.keys()):
                 logger.warning(f"Campos faltantes desde {client_ip}: {', '.join(missing)}")
-                return jsonify({"error": f"Campos faltantes: {', '.join(missing)}"}), 400
+                return jsonify({"error": f"Campos requeridos: {', '.join(missing)}"}), 400
                 
-            # Validación específica para compras
-            if data['action'].lower() == 'buy':
-                if 'trailing_stop' not in data:
-                    logger.warning(f"Falta trailing_stop desde {client_ip}")
-                    return jsonify({"error": "Se requiere trailing_stop para compras"}), 400
+            # Procesamiento de señal
+            processed_signal = signal_processor.process_signal(data)
+            if not processed_signal:
+                return jsonify({"error": "Señal inválida"}), 400
                 
-                # Validación de rango de trailing stop [7]
-                trailing = float(data['trailing_stop'])
-                if not (0.001 <= trailing <= 0.2):
-                    logger.warning(f"Trailing stop inválido desde {client_ip}: {trailing}")
-                    return jsonify({"error": "Trailing stop debe estar entre 0.1% y 20%"}), 400
-            
             return f(*args, **kwargs)
         finally:
             logger.info(f"Webhook procesado en {time.time() - start_time:.2f}s")
-            
     return wrapper
 
 # =============================================
-# NÚCLEO DEL TRADING BOT (VERSIÓN PRODUCCIÓN)
+# NÚCLEO DEL TRADING ENGINE (CORREGIDO)
 # =============================================
 class TradingBot:
     def __init__(self):
         self._lock = Lock()
         self._shutdown_event = Event()
-        self._state = self._load_initial_state()  # Carga estado desde DB [6]
+        self._state = self._load_initial_state()
         self._setup_logging()
-        
-        logger.info("Inicialización completa del motor de trading")
+        logger.info("Motor de trading inicializado")
 
     def _setup_logging(self):
-        """Configuración profesional de logs"""
-        self._trade_logger = logging.getLogger('TradeLogger')
+        """Configuración avanzada de logs de trading"""
+        self._trade_logger = logging.getLogger('TradeAudit')
+        handler = logging.FileHandler('trades.log')
+        handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
+        self._trade_logger.addHandler(handler)
         self._trade_logger.propagate = False
-        self._trade_logger.addHandler(logging.FileHandler('trades.log'))
 
     def _load_initial_state(self) -> Dict:
-        """Carga estado inicial desde PostgreSQL [6]"""
+        """Carga estado inicial desde DB con manejo de errores"""
         try:
             result = db_manager.execute_query(
                 "SELECT * FROM positions WHERE closed = FALSE ORDER BY created_at DESC LIMIT 1"
             )
             if result:
                 position = result[0]
-                logger.info(f"Estado recuperado de DB: {position['symbol']}")
                 return {
                     'active': True,
                     'symbol': position['symbol'],
@@ -125,7 +118,7 @@ class TradingBot:
                     'capital': Decimal(str(position['remaining_capital']))
                 }
         except Exception as e:
-            logger.error(f"Error cargando estado inicial: {str(e)}")
+            logger.error(f"Error cargando estado: {str(e)}")
         
         return {
             'active': False,
@@ -138,53 +131,64 @@ class TradingBot:
 
     @synchronized('_lock')
     def execute_buy(self, symbol: str, trailing_percent: float) -> Tuple[bool, str]:
-        """Ejecución mejorada de compra con persistencia en DB"""
+        """Ejecución de compra mejorada con normalización Kraken"""
         try:
+            # Normalización profesional del símbolo
+            normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
+            
             # Validación de mercado
-            market = exchange_client.validate_symbol(symbol)
-            if not market:
-                return False, f"Par {symbol} no disponible"
+            market = exchange_client.validate_symbol(normalized_symbol)
+            if not market or 'ordermin' not in market:
+                return False, f"Par {normalized_symbol} no disponible"
             
-            # Cálculos precisos
-            ticker = exchange_client.fetch_ticker(symbol)
-            price = Decimal(str(ticker['ask']))
-            amount = (self._state['capital'] / price).quantize(Decimal('0.00000001'))
+            # Obtención de precio preciso
+            ticker = exchange_client.fetch_ticker(normalized_symbol)
+            price = Decimal(str(ticker['ask'])).quantize(Decimal('0.00000001'))
             
-            # Verificación de límites
-            if amount < market['min_amount']:
-                return False, f"Monto mínimo no alcanzado: {market['min_amount']}"
-            
-            # Ejecución de orden
-            order = exchange_client.create_limit_order(
-                symbol=symbol,
-                side='buy',
-                amount=amount,
-                price=price,
-                trailing_stop=trailing_percent
+            # Cálculo de cantidad con redondeo seguro
+            amount = (self._state['capital'] / price).quantize(
+                Decimal('0.00000001'), 
+                rounding=ROUND_UP
             )
             
-            # Actualización de estado
+            # Validación de límites usando ordermin
+            min_amount = Decimal(str(market['ordermin']))
+            if amount < min_amount:
+                return False, f"Monto mínimo requerido: {min_amount} {normalized_symbol}"
+            
+            # Ejecución de orden limitada
+            order = exchange_client.create_limit_order(
+                symbol=normalized_symbol,
+                side='buy',
+                amount=float(amount),
+                price=float(price)
+            
+            # Actualización de estado con precisión decimal
+            invested = amount * price
+            remaining_capital = self._state['capital'] - invested
+            
             self._state.update({
                 'active': True,
-                'symbol': symbol,
+                'symbol': normalized_symbol,
                 'entry_price': price,
                 'size': amount,
                 'trailing_stop': Decimal(str(trailing_percent)),
-                'capital': Decimal('0')
+                'capital': remaining_capital.quantize(Decimal('0.01'))
             })
             
-            # Persistencia en DB [6]
+            # Persistencia transaccional
             db_manager.transactional([
-                ("INSERT INTO positions (symbol, entry_price, size, trailing_stop, remaining_capital) VALUES (%s, %s, %s, %s, %s)",
-                 (symbol, float(price), float(amount), float(trailing_percent), 0.0)),
-                ("UPDATE capital SET balance = %s", (0.0,))
+                ("""INSERT INTO positions 
+                    (symbol, entry_price, size, trailing_stop, remaining_capital) 
+                    VALUES (%s, %s, %s, %s, %s)""",
+                 (normalized_symbol, float(price), float(amount), float(trailing_percent), float(remaining_capital))),
+                ("UPDATE capital SET balance = %s", (float(remaining_capital),))
             ])
             
             self._trade_logger.info(
-                f"COMPRA | {symbol} | "
-                f"Precio: {price:.8f} | "
-                f"Tamaño: {amount:.8f} | "
-                f"Trailing: {trailing_percent*100:.2f}%"
+                f"COMPRA | {normalized_symbol} | "
+                f"Precio: {price:.8f} | Tamaño: {amount:.8f} | "
+                f"Inversión: {invested:.2f}€ | Capital restante: {remaining_capital:.2f}€"
             )
             
             return True, order['id']
@@ -198,42 +202,42 @@ class TradingBot:
 
     @synchronized('_lock')
     def execute_sell(self) -> Tuple[bool, str]:
-        """Ejecución mejorada de venta con gestión de fallos"""
+        """Ejecución de venta con reinversión de capital"""
         try:
             if not self._state['active']:
                 return False, "Sin posición activa"
             
-            # Obtener datos de mercado
+            # Obtención de precio de mercado
             ticker = exchange_client.fetch_ticker(self._state['symbol'])
-            price = Decimal(str(ticker['bid']))
+            price = Decimal(str(ticker['bid'])).quantize(Decimal('0.00000001'))
             
-            # Ejecutar venta
+            # Intentar orden limitada primero
             try:
                 order = exchange_client.create_limit_order(
                     symbol=self._state['symbol'],
                     side='sell',
-                    amount=self._state['size'],
-                    price=price
-                )
+                    amount=float(self._state['size'])),
+                    price=float(price))
             except ccxt.InvalidOrder:
                 order = exchange_client.create_market_order(
                     symbol=self._state['symbol'],
                     side='sell',
-                    amount=self._state['size']
-                )
+                    amount=float(self._state['size']))
             
-            # Actualizar capital
-            new_capital = self._state['size'] * price
-            profit = new_capital - self._state['capital']
+            # Cálculo preciso de ganancias
+            sale_proceeds = self._state['size'] * price
+            new_capital = self._state['capital'] + sale_proceeds
+            profit = new_capital - config.INITIAL_CAPITAL
             
-            # Actualizar estado y DB
+            # Actualización de estado
             self._state.update({
                 'active': False,
-                'capital': new_capital,
+                'capital': new_capital.quantize(Decimal('0.01')),
                 'symbol': None,
                 'size': Decimal('0')
             })
             
+            # Actualización transaccional en DB
             db_manager.transactional([
                 ("UPDATE positions SET exit_price = %s, closed = TRUE WHERE closed = FALSE",
                  (float(price),)),
@@ -242,18 +246,18 @@ class TradingBot:
             
             self._trade_logger.info(
                 f"VENTA | {self._state['symbol']} | "
-                f"Precio: {price:.8f} | "
-                f"Beneficio: {profit:.2f}€"
+                f"Precio: {price:.8f} | Beneficio: {profit:.2f}€ | "
+                f"Nuevo capital: {new_capital:.2f}€"
             )
             
             return True, order['id']
             
         except Exception as e:
-            logger.critical(f"Error crítico en venta: {str(e)}", exc_info=True)
+            logger.critical(f"Error en venta: {str(e)}", exc_info=True)
             return False, str(e)
 
     def manage_orders(self):
-        """Gestión profesional de órdenes con trailing stop [3]"""
+        """Gestión activa de órdenes con trailing stop"""
         logger.info("Iniciando monitorización de posiciones")
         while not self._shutdown_event.is_set():
             try:
@@ -261,28 +265,18 @@ class TradingBot:
                     time.sleep(15)
                     continue
                 
-                # Verificar timeout de posición
-                if time.time() - self._state['last_update'] > 1800:
-                    logger.warning("Timeout de posición, liquidando...")
-                    self.execute_sell()
-                    continue
-                
-                # Actualizar precio y trailing stop
+                # Lógica de trailing stop actualizada
                 ticker = exchange_client.fetch_ticker(self._state['symbol'])
                 current_price = Decimal(str(ticker['last']))
-                
-                # Calcular nuevo stop
                 new_stop = current_price * (1 - self._state['trailing_stop'])
-                if new_stop > self._state['stop_price']:
+                
+                # Actualización dinámica del stop
+                if new_stop > self._state.get('current_stop', Decimal('0')):
                     exchange_client.update_order(
                         order_id=self._state['order_id'],
-                        new_stop=new_stop
-                    )
-                    self._state.update({
-                        'stop_price': new_stop,
-                        'last_update': time.time()
-                    })
-                    logger.debug(f"Trailing actualizado: {new_stop:.8f}")
+                        new_stop=float(new_stop))
+                    self._state['current_stop'] = new_stop
+                    logger.info(f"Trailing actualizado: {new_stop:.8f}")
                 
                 time.sleep(30)
                 
@@ -291,110 +285,103 @@ class TradingBot:
                 time.sleep(60)
 
     def shutdown(self):
-        """Protocolo de apagado mejorado"""
+        """Protocolo de apagado seguro"""
         logger.info("Iniciando secuencia de apagado...")
         self._shutdown_event.set()
         
         try:
             if self._state['active']:
                 logger.warning("Liquidando posición activa...")
-                success, _ = self.execute_sell()
-                if not success:
-                    logger.error("No se pudo liquidar posición")
+                self.execute_sell()
         except Exception as e:
-            logger.error(f"Error en apagado: {str(e)}")
+            logger.error(f"Error durante el apagado: {str(e)}")
         
         db_manager.close()
         logger.info("Sistema apagado correctamente")
 
 # =============================================
-# ENDPOINTS API OPTIMIZADOS
+# ENDPOINTS API PROFESIONALES
 # =============================================
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Endpoint de salud mejorado con verificación de DB"""
+    """Endpoint de salud completo"""
     try:
-        db_status = "ok" if db_manager.test_connection() else "error"
+        db_status = "OK" if db_manager.execute_query("SELECT 1") else "Error"
+        exchange_status = "OK" if exchange_client.check_connection() else "Error"
+        return jsonify({
+            "status": "Operacional",
+            "database": db_status,
+            "exchange": exchange_status,
+            "capital": float(bot._state['capital']),
+            "posición_activa": bot._state['active']
+        }), 200
     except Exception as e:
-        db_status = f"error: {str(e)}"
-    
-    return jsonify({
-        "status": "operacional",
-        "db_status": db_status,
-        "capital": float(bot._state['capital']),
-        "posicion_activa": bot._state['active']
-    }), 200
+        logger.error(f"Health check fallido: {str(e)}")
+        return jsonify({"status": "Error"}), 500
 
 @app.route('/webhook', methods=['POST'])
 @validate_webhook
 def handle_webhook():
-    """Manejador mejorado de webhooks con registro en DB"""
+    """Manejador profesional de webhooks"""
     data = request.get_json()
     action = data['action'].lower()
-    symbol = data['symbol'].replace('-', '/').upper()
     
     try:
         if action == 'buy':
-            trailing = float(data['trailing_stop'])
-            success, order_id = bot.execute_buy(symbol, trailing)
-            
+            success, order_id = bot.execute_buy(
+                data['symbol'],
+                float(data['trailing_stop'])
+            )
             if success:
-                # Iniciar monitorización en hilo seguro
-                Thread(
-                    target=bot.manage_orders,
-                    daemon=True,
-                    name=f"OrderManager-{symbol}"
-                ).start()
-                
+                Thread(target=bot.manage_orders, daemon=True).start()
                 return jsonify({
                     "status": "success",
-                    "order_id": order_id
+                    "order_id": order_id,
+                    "symbol": bot._state['symbol'],
+                    "capital_restante": float(bot._state['capital'])
                 }), 200
-                
             return jsonify({"error": order_id}), 400
             
         elif action == 'sell':
             success, order_id = bot.execute_sell()
             return jsonify({
                 "status": "success" if success else "error",
-                "order_id": order_id
+                "order_id": order_id,
+                "nuevo_capital": float(bot._state['capital'])
             }), 200 if success else 400
             
         return jsonify({"error": "Acción no válida"}), 400
-        
     except Exception as e:
-        logger.error(f"Error en webhook: {str(e)}", exc_info=True)
+        logger.error(f"Error en webhook: {str(e)}")
         db_manager.log_error("webhook_error", str(e))
-        return jsonify({"error": "Error interno"}), 500
+        return jsonify({"error": "Error interno del servidor"}), 500
 
 # =============================================
 # INICIALIZACIÓN ROBUSTA
 # =============================================
 def run_server():
-    """Lanzador profesional mejorado"""
+    """Lanzador profesional para producción"""
     from waitress import serve
     serve(
         app,
         host="0.0.0.0",
         port=config.WEB_SERVER_PORT,
-        threads=4,  # Número fijo para producción
-        channel_timeout=600,  # Timeout aumentado
-        connection_limit=100
+        threads=8,
+        channel_timeout=1200
     )
 
-try:
-    bot = TradingBot()
-    atexit.register(bot.shutdown)
-    logger.info("Servicio inicializado correctamente")
-except Exception as e:
-    logger.critical(f"Error de inicialización: {str(e)}")
-    raise SystemExit(1)
-
 if __name__ == '__main__':
-    print("\n" + "="*50)
-    print("🚀 CRYPTO TRADING BOT - EDICIÓN PRODUCCIÓN")
-    print(f"🔗 Puerto: {config.WEB_SERVER_PORT}")
-    print(f"💰 Capital inicial: {config.INITIAL_CAPITAL}€")
-    print("="*50 + "\n")
-    
-    run_server()
+    try:
+        bot = TradingBot()
+        atexit.register(bot.shutdown)
+        logger.info(f"""
+        ==============================
+        🚀 Crypto Trading Bot (v1.2.0)
+        Port: {config.WEB_SERVER_PORT}
+        Capital: {config.INITIAL_CAPITAL}€
+        ==============================
+        """)
+        run_server()
+    except Exception as e:
+        logger.critical(f"Error de inicialización: {str(e)}")
+        raise SystemExit(1)

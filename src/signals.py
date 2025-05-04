@@ -32,7 +32,7 @@ class SignalProcessor:
             'required_fields': ['action', 'symbol', 'trailing_stop'],
             'action_values': ['buy', 'sell'],
             'trailing_stop_range': (0.001, 0.2),  # 0.1% a 20%
-            'symbol_blacklist': ['STEPEUR', 'SRMEUR']  # Pares problemáticos [4]
+            'symbol_blacklist': ['SRMEUR']  # Pares problemáticos [4]
         }
 
     def process_signal(self, raw_signal: Dict) -> Optional[Dict]:
@@ -92,9 +92,9 @@ class SignalProcessor:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        """Normalización compatible con Kraken [4][6]"""
-        # Convertir a formato Kraken: STEP-EUR -> STEPEUR, BTC-USD -> BTC/USD
-        normalized = symbol.upper().replace('-', '').replace('/', '')
+        """Conversión a formato API de Kraken"""
+        # Ejemplo: "STEP-EUR" → "STEPEUR" (altname real)
+        return symbol.upper().replace('-', '').replace('/', '')
         
         # Excepciones para pares con USD
         if 'USD' in normalized and not normalized.endswith('USD'):

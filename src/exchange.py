@@ -73,13 +73,10 @@ class ExchangeClient:
             return False
             
     def validate_symbol(self, symbol: str) -> Optional[dict]:
-        """Valida si un símbolo existe en Kraken"""
-        try:
-            markets = self.client.load_markets()
-            return markets.get(symbol.upper().replace('-', '/'))
-        except Exception as e:
-            logger.error("Error validando símbolo: %s", str(e))
-            return None
+        """Usar altname para validación"""
+        markets = self.client.load_markets()
+        pair_data = markets.get(symbol)
+        return pair_data.get('altname') if pair_data else None
 
     def fetch_ticker(self, symbol: str) -> Dict:
         """Obtiene datos de mercado para un símbolo"""
