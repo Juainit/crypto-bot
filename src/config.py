@@ -70,6 +70,11 @@ class Config:
         return bool(os.getenv("RAILWAY_ENVIRONMENT"))
     
     @property
+    def ENVIRONMENT(self) -> str:
+        """Entorno actual (production/staging)"""
+        return os.getenv("ENVIRONMENT", "production")
+    
+    @property
     def SSL_DATABASE(self) -> bool:
         """Habilita SSL para PostgreSQL en producción"""
         return self.IS_PRODUCTION

@@ -93,6 +93,20 @@ class DatabaseManager:
                 self.pool.putconn(conn)
         except Exception as e:
             logger.error(f"Error liberando conexión: {str(e)}")
+    
+    def close(self) -> None:
+        """Cierre profesional del pool"""
+        if self.pool:
+            self.pool.closeall()
+            logger.info("Pool PostgreSQL cerrado")
+
+    def log_error(self, error_type: str, message: str) -> None:
+        """Registro profesional de errores en DB"""
+        query = """
+            INSERT INTO errors (type, message, timestamp)
+            VALUES (%s, %s, NOW())
+        """
+        self.execute_query(query, (error_type, message))
 
     def _reconnect(self) -> None:
         """Reconexión profesional tras fallos"""
