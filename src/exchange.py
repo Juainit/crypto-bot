@@ -72,20 +72,23 @@ class ExchangeClient:
             logger.error("Error de red: %s", str(e))
             return False
             
-    def validate_symbol(self, symbol: str) -> bool:
-        try:
-            markets = self.client.load_markets()  # Fuerza carga actualizada
-            normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
-            for market in markets.values():
-                if normalized_symbol == market.get('altname'):
-                    return True
-            logger.error(f"Símbolo {symbol} no encontrado. ¿Usaste el altname? Ejemplos válidos: {list(m['altname'] for m in markets.values())[:5]}")
-            return False
-        except Exception as e:
-            logger.error(f"Error validando símbolo: {str(e)}")
-            return False
+    def validate_symbol(self, symbol: str) -> dict:  # ← Ahora retorna dict (no bool)
+    try:
+        markets = self.client.load_markets()
+        normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
+        for market_id, market in markets.items():
+            if normalized_symbol == market.get('altname'):
+                return market  # ← Retorna el diccionario completo
+        logger.error(f"Símbolo {symbol} no encontrado en Kraken")
+        return None
+    except Exception as e:
+        logger.error(f"Error validando símbolo: {str(e)}")
+        return None
 
-    def fetch_ticker(self, symbol: str) -> Dict:
+    def fetch_ticker(self, symbol: str) -> dict:
+        normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
+        return self.client.fetch_ticker(normalized_symbol)
+    
         """Obtiene datos de mercado para un símbolo"""
         try:
             return self.client.fetch_ticker(symbol.upper().replace('-', '/'))

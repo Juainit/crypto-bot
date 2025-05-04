@@ -132,9 +132,15 @@ class TradingEngine:
         return self._state['capital']
 
     @synchronized('_lock')
-    def execute_buy(self, symbol: str, trailing: float) -> Tuple[bool, str]:
-        """Lógica profesional de compra con persistencia en DB"""
-        try:
+    def execute_buy(self, symbol: str, trailing_stop: float):
+    market = exchange_client.validate_symbol(symbol)  # ← Ahora recibe dict o None
+    if not market:
+        return False, f"Par {symbol} no disponible"
+    
+    try:
+        amount = self.calculate_amount()  # Ejemplo: 40€
+        if amount < market['limits']['amount']['min']:  # ← Accede correctamente
+            return False, f"Monto mínimo no alcanzado (requerido: {market['limits']['amount']['min']})"
             with self._operation_lock:
                 # Validación de mercado [5]
                 market = exchange_client.validate_symbol(symbol)
@@ -184,13 +190,13 @@ class TradingEngine:
                 
                 return True, order['id']
                 
-        except ccxt.InsufficientFunds as e:
-            logger.critical("Fondos insuficientes en exchange")
-            return False, str(e)
-        except Exception as e:
-            logger.error("Error en compra: %s", str(e), exc_info=True)
-            db_manager.log_error("buy_error", str(e))
-            return False, str(e)
+            except ccxt.InsufficientFunds as e:
+                logger.critical("Fondos insuficientes en exchange")
+                return False, str(e)
+            except Exception as e:
+                logger.error("Error en compra: %s", str(e), exc_info=True)
+                db_manager.log_error("buy_error", str(e))
+                return False, str(e)
 
     def _manage_position(self):
         """Gestión profesional de posiciones con actualización en DB"""
