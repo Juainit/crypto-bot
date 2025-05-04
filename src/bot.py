@@ -128,78 +128,6 @@ class TradingBot:
             'trailing_stop': Decimal('0.02'),
             'capital': Decimal(str(config.INITIAL_CAPITAL))
         }
-
-    @synchronized('_lock')
-    def execute_buy(self, symbol: str, trailing_percent: float) -> Tuple[bool, str]:
-        """Ejecución de compra mejorada con normalización Kraken"""
-        try:
-            # Normalización profesional del símbolo
-            normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
-            
-            # Validación de mercado
-            market = exchange_client.validate_symbol(normalized_symbol)
-            if not market or 'ordermin' not in market:
-                return False, f"Par {normalized_symbol} no disponible"
-            
-            # Obtención de precio preciso
-            ticker = exchange_client.fetch_ticker(normalized_symbol)
-            price = Decimal(str(ticker['ask'])).quantize(Decimal('0.00000001'))
-            
-            # Cálculo de cantidad con redondeo seguro
-            amount = (self._state['capital'] / price).quantize(
-                Decimal('0.00000001'), 
-                rounding=ROUND_UP
-            )
-            
-            # Validación de límites usando ordermin
-            min_amount = Decimal(str(market['ordermin']))
-            if amount < min_amount:
-                return False, f"Monto mínimo requerido: {min_amount} {normalized_symbol}"
-            
-            # Ejecución de orden limitada
-            order = exchange_client.create_limit_order(
-                symbol=normalized_symbol,
-                side='buy',
-                amount=float(amount),
-                price=float(price)
-            
-            # Actualización de estado con precisión decimal
-            invested = amount * price
-            remaining_capital = self._state['capital'] - invested
-            
-            self._state.update({
-                'active': True,
-                'symbol': normalized_symbol,
-                'entry_price': price,
-                'size': amount,
-                'trailing_stop': Decimal(str(trailing_percent)),
-                'capital': remaining_capital.quantize(Decimal('0.01'))
-            })
-            
-            # Persistencia transaccional
-            db_manager.transactional([
-                ("""INSERT INTO positions 
-                    (symbol, entry_price, size, trailing_stop, remaining_capital) 
-                    VALUES (%s, %s, %s, %s, %s)""",
-                 (normalized_symbol, float(price), float(amount), float(trailing_percent), float(remaining_capital))),
-                ("UPDATE capital SET balance = %s", (float(remaining_capital),))
-            ])
-            
-            self._trade_logger.info(
-                f"COMPRA | {normalized_symbol} | "
-                f"Precio: {price:.8f} | Tamaño: {amount:.8f} | "
-                f"Inversión: {invested:.2f}€ | Capital restante: {remaining_capital:.2f}€"
-            )
-            
-            return True, order['id']
-            
-        except ccxt.InsufficientFunds as e:
-            logger.critical("Fondos insuficientes en el exchange")
-            return False, str(e)
-        except Exception as e:
-            logger.error(f"Error en compra: {str(e)}", exc_info=True)
-            return False, str(e)
-
     @synchronized('_lock')
     def execute_sell(self) -> Tuple[bool, str]:
         """Ejecución de venta con reinversión de capital"""
@@ -216,13 +144,16 @@ class TradingBot:
                 order = exchange_client.create_limit_order(
                     symbol=self._state['symbol'],
                     side='sell',
-                    amount=float(self._state['size'])),
-                    price=float(price))
-            except ccxt.InvalidOrder:
+                    amount=float(self._state['size']),
+                    price=float(price)
+                )
+            except ccxt.InvalidOrder as e:
+                logger.warning(f"Orden limitada rechazada: {str(e)}. Intentando market order...")
                 order = exchange_client.create_market_order(
                     symbol=self._state['symbol'],
                     side='sell',
-                    amount=float(self._state['size']))
+                    amount=float(self._state['size'])
+                )
             
             # Cálculo preciso de ganancias
             sale_proceeds = self._state['size'] * price
@@ -240,7 +171,7 @@ class TradingBot:
             # Actualización transaccional en DB
             db_manager.transactional([
                 ("UPDATE positions SET exit_price = %s, closed = TRUE WHERE closed = FALSE",
-                 (float(price),)),
+                (float(price),)),
                 ("UPDATE capital SET balance = %s", (float(new_capital),))
             ])
             
@@ -256,6 +187,34 @@ class TradingBot:
             logger.critical(f"Error en venta: {str(e)}", exc_info=True)
             return False, str(e)
 
+    @synchronized('_lock')
+    def manage_orders(self):
+        """Gestión activa de órdenes con trailing stop"""
+        logger.info("Iniciando monitorización de posiciones")
+        while not self._shutdown_event.is_set():
+            try:
+                if not self._state['active']:
+                    time.sleep(15)
+                    continue
+                
+                # Lógica de trailing stop actualizada
+                ticker = exchange_client.fetch_ticker(self._state['symbol'])
+                current_price = Decimal(str(ticker['last']))
+                new_stop = current_price * (1 - self._state['trailing_stop'])
+                
+                # Actualización dinámica del stop
+                if new_stop > self._state.get('current_stop', Decimal('0')):
+                    exchange_client.update_order(
+                        order_id=self._state['order_id'],
+                        new_stop=float(new_stop))
+                    self._state['current_stop'] = new_stop
+                    logger.info(f"Trailing actualizado: {new_stop:.8f}")
+                
+                time.sleep(30)
+                
+            except Exception as e:
+                logger.error(f"Error en monitorización: {str(e)}")
+                time.sleep(60)
     def manage_orders(self):
         """Gestión activa de órdenes con trailing stop"""
         logger.info("Iniciando monitorización de posiciones")
