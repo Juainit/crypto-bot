@@ -49,6 +49,14 @@ class ExchangeClient:
             logger.error("Error de red: %s", str(e))
             return False
             
+    def validate_symbol(self, symbol: str) -> bool:
+        try:
+            markets = self.client.load_markets()
+            return symbol in markets
+        except Exception as e:
+            logger.error(f"Error validando símbolo: {str(e)}")
+            return False
+            
     def _nonce_generator(self):
         """Generador de nonce a prueba de colisiones [5]"""
         last_nonce = int(time.time() * 1000)

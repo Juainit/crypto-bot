@@ -52,7 +52,7 @@ class DatabaseManager:
             self._initialize_pool()
         self._test_connection()
         logger.info("DatabaseManager inicializado")
-        
+
     def _test_connection(self) -> bool:
         """Verificación profesional de conexión inicial"""
         try:
@@ -76,6 +76,17 @@ class DatabaseManager:
             logger.error(f"Error de conexión: {str(e)}")
             self._reconnect()
             return self.pool.getconn()
+
+    def log_webhook(self, request_data: dict, response_data: dict, status_code: int) -> None:
+        try:
+            self.execute_query(
+                """INSERT INTO webhook_logs 
+                (request_data, response_data, status_code) 
+                VALUES (%s, %s, %s)""",
+            (json.dumps(request_data), json.dumps(response_data), status_code)
+            )
+        except Exception as e:
+            logger.error(f"Error registrando webhook: {str(e)}")
 
     def release_connection(self, conn) -> None:
         """Devuelve conexión al pool de forma segura"""
