@@ -104,3 +104,5 @@ class ExchangeClient:
         except ccxt.InsufficientFunds as e:
             logger.error("Fondos insuficientes: %s", str(e))
             raise
+
+exchange_client = ExchangeClient()  # ¡Nota el nombre en minúsculas!        
