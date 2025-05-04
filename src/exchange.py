@@ -39,7 +39,16 @@ class ExchangeClient:
         except ccxt.AuthenticationError as e:
             logger.critical("Error de autenticación en Kraken. Verifica las API keys [4]")
             raise SystemExit(1) from e
-
+    def validate_connection(self):
+        """Verifica la conexión con Kraken"""
+        try:
+            self.client.fetch_time()  # Llamada básica de prueba
+            logger.info("Conexión con Kraken verificada")
+            return True
+        except ccxt.NetworkError as e:
+            logger.error("Error de red: %s", str(e))
+            return False
+            
     def _nonce_generator(self):
         """Generador de nonce a prueba de colisiones [5]"""
         last_nonce = int(time.time() * 1000)
