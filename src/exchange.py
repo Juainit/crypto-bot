@@ -4,6 +4,8 @@ import logging
 import ccxt
 from typing import Dict, Optional, Tuple
 
+logger = logging.getLogger(__name__)
+
 class ExchangeClient:
     """Cliente mejorado para Kraken con todos los métodos necesarios"""
     
