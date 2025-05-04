@@ -151,10 +151,20 @@ class ExchangeClient:
         return symbol
 
     def _format_amount(self, amount: float, symbol: str) -> float:
-        """Ajusta cantidad a la precisión requerida por el par"""
-        market = self.client.market(symbol)
-        precision = market['precision']['amount']
-        return float(round(amount, precision))
+        try:
+            market = self.client.market(symbol)
+            precision = market['precision']['amount']
+            
+            # Convertir a Decimal para redondeo preciso
+            amount_dec = Decimal(str(amount)).quantize(
+                Decimal('1.' + '0'*precision),
+                rounding=ROUND_UP
+            )
+            return float(amount_dec)
+            
+        except Exception as e:
+            logger.error(f"Error formateando cantidad: {str(e)}")
+            raise
 
     def _format_price(self, price: float, symbol: str) -> float:
         """Ajusta precio a la precisión requerida por el par"""
