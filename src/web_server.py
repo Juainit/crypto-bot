@@ -86,7 +86,7 @@ def validate_webhook(f):
     return wrapper
 
 # =============================================
-# NÚCLEO DEL MOTOR DE TRADING (PRODUCCIÓN)
+# NÚCLEO DEL MOTOR DE TRADING (PRODUCCIÓN) - VERSIÓN CORREGIDA
 # =============================================
 class TradingEngine:
     def __init__(self):
@@ -94,12 +94,12 @@ class TradingEngine:
         self._shutdown_event = Event()
         self._position_lock = Lock()
         self._operation_lock = Lock()
-        self._state = self._load_initial_state()  # Carga desde DB [6]
+        self._state = self._load_initial_state()
         
         logger.info("Motor inicializado | Capital: €%.2f", self.current_capital)
 
     def _load_initial_state(self) -> Dict:
-        """Carga estado inicial desde PostgreSQL [6]"""
+        """Carga estado inicial desde PostgreSQL"""
         try:
             result = db_manager.execute_query(
                 "SELECT * FROM positions WHERE closed = FALSE ORDER BY created_at DESC LIMIT 1"
@@ -132,52 +132,48 @@ class TradingEngine:
         return self._state['capital']
 
     @synchronized('_lock')
-    def execute_buy(self, symbol: str, trailing_stop: float):
-    market = exchange_client.validate_symbol(symbol)  # ← Ahora recibe dict o None
-    if not market:
-        return False, f"Par {symbol} no disponible"
-    
-    try:
-        amount = self.calculate_amount()  # Ejemplo: 40€
-        if amount < market['limits']['amount']['min']:  # ← Accede correctamente
-            return False, f"Monto mínimo no alcanzado (requerido: {market['limits']['amount']['min']})"
+    def execute_buy(self, symbol: str, trailing_stop: float) -> Tuple[bool, str]:
+        """Lógica de compra mejorada con validación completa"""
+        market = exchange_client.validate_symbol(symbol)
+        if not market:
+            return False, f"Par {symbol} no disponible"
+
+        try:
             with self._operation_lock:
-                # Validación de mercado [5]
-                market = exchange_client.validate_symbol(symbol)
-                if not market:
-                    return False, f"Par {symbol} no disponible"
-                
-                # Cálculos precisos
+                # Obtener precio actual
                 ticker = exchange_client.fetch_ticker(symbol)
                 price = Decimal(str(ticker['ask']))
+                
+                # Calcular cantidad con precisión
                 amount = (self.current_capital / price).quantize(Decimal('0.00000001'))
                 
-                # Validación de límites
-                if amount < market['min_amount']:
-                    return False, f"Monto mínimo no alcanzado: {market['min_amount']}"
+                # Validar límites del mercado
+                if amount < Decimal(str(market['limits']['amount']['min'])):
+                    return False, f"Monto mínimo no alcanzado: {market['limits']['amount']['min']}"
                 
                 # Ejecutar orden
                 order = exchange_client.create_limit_order(
                     symbol=symbol,
                     side='buy',
-                    amount=amount,
-                    price=price,
-                    trailing_stop=trailing
+                    amount=float(amount),
+                    price=float(price)
                 )
                 
-                # Actualizar estado y DB [6]
+                # Actualizar estado
                 self._state.update({
                     'active': True,
                     'symbol': symbol,
                     'entry_price': price,
                     'size': amount,
-                    'trailing_stop': Decimal(str(trailing)),
-                    'capital': Decimal('0')
+                    'trailing_stop': Decimal(str(trailing_stop)),
+                    'capital': Decimal('0'),
+                    'last_update': time.time()
                 })
                 
+                # Persistir en DB
                 db_manager.transactional([
                     ("INSERT INTO positions (symbol, entry_price, size, trailing_stop, remaining_capital) VALUES (%s, %s, %s, %s, %s)",
-                     (symbol, float(price), float(amount), float(trailing), 0.0)),
+                     (symbol, float(price), float(amount), float(trailing_stop), 0.0)),
                     ("UPDATE capital SET balance = %s", (0.0,))
                 ])
                 
@@ -190,21 +186,21 @@ class TradingEngine:
                 
                 return True, order['id']
                 
-            except ccxt.InsufficientFunds as e:
-                logger.critical("Fondos insuficientes en exchange")
-                return False, str(e)
-            except Exception as e:
-                logger.error("Error en compra: %s", str(e), exc_info=True)
-                db_manager.log_error("buy_error", str(e))
-                return False, str(e)
+        except ccxt.InsufficientFunds as e:
+            logger.critical("Fondos insuficientes en exchange: %s", str(e))
+            return False, str(e)
+        except Exception as e:
+            logger.error("Error en compra: %s", str(e), exc_info=True)
+            db_manager.log_error("buy_error", str(e))
+            return False, str(e)
 
     def _manage_position(self):
-        """Gestión profesional de posiciones con actualización en DB"""
-        logger.info("Iniciando monitorización de posición")
+        """Monitorización activa de la posición"""
+        logger.info("Iniciando monitorización de posición para %s", self._state['symbol'])
         while self._state['active'] and not self._shutdown_event.is_set():
             try:
-                # Timeout de posición
-                if time.time() - self._state.get('last_update', 0) > 1800:
+                # Timeout de posición (30 minutos)
+                if time.time() - self._state['last_update'] > 1800:
                     logger.warning("Timeout de posición, liquidando...")
                     self.execute_sell()
                     break
@@ -214,8 +210,9 @@ class TradingEngine:
                 current_price = Decimal(str(ticker['last']))
                 
                 # Verificar stop loss
-                if current_price <= self._state['entry_price'] * (1 - self._state['trailing_stop']):
-                    logger.info("Stop loss activado")
+                stop_price = self._state['entry_price'] * (1 - self._state['trailing_stop'])
+                if current_price <= stop_price:
+                    logger.info("Stop loss activado a %.4f", stop_price)
                     self.execute_sell()
                     break
                 
@@ -236,32 +233,34 @@ class TradingEngine:
 
     @synchronized('_lock')
     def execute_sell(self) -> Tuple[bool, str]:
-        """Lógica profesional de venta con persistencia en DB"""
+        """Lógica de venta con manejo de errores"""
+        if not self._state['active']:
+            return False, "Sin posición activa"
+
         try:
-            if not self._state['active']:
-                return False, "Sin posición activa"
-            
             # Obtener datos de mercado
             ticker = exchange_client.fetch_ticker(self._state['symbol'])
             price = Decimal(str(ticker['bid']))
             
-            # Ejecutar venta
+            # Intentar venta limitada primero, luego market
             try:
                 order = exchange_client.create_limit_order(
                     symbol=self._state['symbol'],
                     side='sell',
-                    amount=self._state['size'],
-                    price=price
+                    amount=float(self._state['size']),
+                    price=float(price)
                 )
             except ccxt.InvalidOrder:
                 order = exchange_client.create_market_order(
                     symbol=self._state['symbol'],
                     side='sell',
-                    amount=self._state['size']
+                    amount=float(self._state['size'])
                 )
             
-            # Actualizar estado
+            # Calcular nuevo capital
             new_capital = self._state['size'] * price
+            
+            # Actualizar estado
             self._state.update({
                 'active': False,
                 'capital': new_capital,
@@ -271,11 +270,12 @@ class TradingEngine:
             
             # Persistir en DB
             db_manager.transactional([
-                ("UPDATE positions SET exit_price = %s, closed = TRUE WHERE closed = FALSE",
-                 (float(price),)),
+                ("UPDATE positions SET exit_price = %s, closed = TRUE, profit = %s WHERE closed = FALSE",
+                 (float(price), float(new_capital - config.INITIAL_CAPITAL))),
                 ("UPDATE capital SET balance = %s", (float(new_capital),))
             ])
             
+            logger.info("Venta ejecutada correctamente. Beneficio: €%.2f", new_capital - config.INITIAL_CAPITAL)
             return True, order['id']
             
         except Exception as e:
@@ -284,7 +284,7 @@ class TradingEngine:
             return False, str(e)
 
     def shutdown(self):
-        """Protocolo de apagado profesional"""
+        """Protocolo de apagado seguro"""
         logger.info("Iniciando secuencia de apagado...")
         self._shutdown_event.set()
         
