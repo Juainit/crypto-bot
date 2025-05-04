@@ -72,11 +72,18 @@ class ExchangeClient:
             logger.error("Error de red: %s", str(e))
             return False
             
-    def validate_symbol(self, symbol: str) -> Optional[dict]:
-        """Usar altname para validación"""
-        markets = self.client.load_markets()
-        pair_data = markets.get(symbol)
-        return pair_data.get('altname') if pair_data else None
+    def validate_symbol(self, symbol: str) -> bool:
+        try:
+            markets = self.client.load_markets()  # Fuerza carga actualizada
+            normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
+            for market in markets.values():
+                if normalized_symbol == market.get('altname'):
+                    return True
+            logger.error(f"Símbolo {symbol} no encontrado. ¿Usaste el altname? Ejemplos válidos: {list(m['altname'] for m in markets.values())[:5]}")
+            return False
+        except Exception as e:
+            logger.error(f"Error validando símbolo: {str(e)}")
+            return False
 
     def fetch_ticker(self, symbol: str) -> Dict:
         """Obtiene datos de mercado para un símbolo"""

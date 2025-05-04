@@ -34,12 +34,12 @@ class Config:
     @property
     def KRAKEN_API_KEY(self) -> str:
         """API Key de Kraken (requerida)"""
-        return os.getenv("KRAKEN_API_KEY", "")
+        return os.getenv("KRAKEN_API_KEY", "").strip()
     
     @property
     def KRAKEN_SECRET(self) -> str:
         """API Secret de Kraken (requerida)"""
-        return os.getenv("KRAKEN_SECRET", "")
+        return os.getenv("KRAKEN_SECRET", "").strip()
     
     @property
     def DATABASE_URL(self) -> str:

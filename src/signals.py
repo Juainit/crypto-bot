@@ -32,7 +32,7 @@ class SignalProcessor:
             'required_fields': ['action', 'symbol', 'trailing_stop'],
             'action_values': ['buy', 'sell'],
             'trailing_stop_range': (0.001, 0.2),  # 0.1% a 20%
-            'symbol_blacklist': ['SRMEUR']  # Pares problemáticos [4]
+            'symbol_blacklist': []  # Pares problemáticos [4]
         }
 
     def process_signal(self, raw_signal: Dict) -> Optional[Dict]:
@@ -92,8 +92,7 @@ class SignalProcessor:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        """Conversión a formato API de Kraken"""
-        # Ejemplo: "STEP-EUR" → "STEPEUR" (altname real)
+        """Convierte a formato altname de Kraken (ej: STEP/EUR → STEPEUR)"""
         return symbol.upper().replace('-', '').replace('/', '')
         
         # Excepciones para pares con USD
