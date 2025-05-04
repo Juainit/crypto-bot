@@ -4,7 +4,14 @@ import logging
 import ccxt
 from typing import Dict, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("KrakenBot")  
+logger.setLevel(logging.INFO)  # <-- Nivel crítico
+
+# Configura un handler básico si no existe
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+    logger.addHandler(handler)
 
 class ExchangeClient:
     """Cliente mejorado para Kraken con todos los métodos necesarios"""
