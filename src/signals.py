@@ -1,5 +1,7 @@
+# signals.py
 import logging
-from typing import Dict, Optional, Union
+import time  # Importación faltante en el código original
+from typing import Dict, Optional
 
 class SignalProcessor:
     """
@@ -7,11 +9,20 @@ class SignalProcessor:
     - Validación avanzada
     - Normalización de símbolos
     - Manejo de errores estructurado
+    - Inicialización explícita
     """
     
     def __init__(self):
         self.logger = logging.getLogger(self.__class__.__name__)
         self._configure_validations()
+        self.initialized = False  # Nuevo estado de inicialización
+
+    def initialize(self):
+        """Inicialización explícita para el sistema de componentes"""
+        if not self.initialized:
+            self.logger.info("Inicializando procesador de señales")
+            # Lógica de inicialización adicional si fuera necesaria
+            self.initialized = True
 
     def _configure_validations(self):
         """Configuración centralizada de reglas de validación"""
@@ -26,7 +37,6 @@ class SignalProcessor:
         try:
             if not self._validate_signal(raw_signal):
                 return None
-
             return self._normalize_signal(raw_signal)
             
         except Exception as e:

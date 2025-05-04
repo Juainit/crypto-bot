@@ -86,7 +86,7 @@ class StartupValidator:
         
         components = [
             (db_manager, "Database Manager"),
-            (SignalProcessor, "Signal Processor")
+            (SignalProcessor(), "Signal Processor")
         ]
         
         with ThreadPoolExecutor(max_workers=2) as executor:
