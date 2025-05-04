@@ -46,6 +46,13 @@ class DatabaseManager:
             logger.critical(f"Error inicializando pool: {str(e)}")
             raise
 
+    def initialize(self):
+        """Inicialización pública para el sistema de componentes"""
+        if not self.pool:  # Solo inicializar si no existe el pool
+            self._initialize_pool()
+        self._test_connection()
+        logger.info("DatabaseManager inicializado")
+        
     def _test_connection(self) -> bool:
         """Verificación profesional de conexión inicial"""
         try:
