@@ -84,7 +84,7 @@ class SignalProcessor:
         """Normalización de símbolos según estándares Kraken"""
         symbol = symbol.upper().replace('-', '/')
         if 'EUR' in symbol and '/' not in symbol:
-            return f"{symbol.replace('EUR', '')}/EUR"
+            return symbol.upper().replace('-', '').replace('/', '')
         return symbol
 
 # Instancia preconfigurada para uso global
