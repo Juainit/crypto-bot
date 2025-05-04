@@ -72,14 +72,14 @@ class ExchangeClient:
             logger.error("Error de red: %s", str(e))
             return False
             
-    def validate_symbol(self, symbol: str) -> bool:
+    def validate_symbol(self, symbol: str) -> Optional[dict]:
         """Valida si un símbolo existe en Kraken"""
         try:
             markets = self.client.load_markets()
-            return symbol.upper().replace('-', '/') in markets
+            return markets.get(symbol.upper().replace('-', '/'))
         except Exception as e:
             logger.error("Error validando símbolo: %s", str(e))
-            return False
+            return None
 
     def fetch_ticker(self, symbol: str) -> Dict:
         """Obtiene datos de mercado para un símbolo"""

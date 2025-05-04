@@ -1,6 +1,7 @@
 # src/database.py
 import os
 import logging
+import json
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from urllib.parse import urlparse
@@ -83,7 +84,7 @@ class DatabaseManager:
                 """INSERT INTO webhook_logs 
                 (request_data, response_data, status_code) 
                 VALUES (%s, %s, %s)""",
-            (json.dumps(request_data), json.dumps(response_data), status_code)
+                (json.dumps(request_data), json.dumps(response_data), status_code)  # Requiere importación
             )
         except Exception as e:
             logger.error(f"Error registrando webhook: {str(e)}")
