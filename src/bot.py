@@ -244,7 +244,7 @@ class TradingBot:
                 time.sleep(60)
 
     def shutdown(self):
-        """Protocolo de apagado seguro"""
+        """Protoculo de apagado seguro"""
         logger.info("Iniciando secuencia de apagado...")
         self._shutdown_event.set()
         
