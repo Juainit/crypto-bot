@@ -134,7 +134,8 @@ class TradingEngine:
     @synchronized('_lock')
     def execute_buy(self, symbol: str, trailing_stop: float) -> Tuple[bool, str]:
         """Lógica de compra mejorada con validación completa"""
-        market = exchange_client.validate_symbol(symbol)
+        normalized = exchange_client._normalize_symbol(symbol)
+        market = exchange_client.client.market(normalized)
         if not market:
             return False, f"Par {symbol} no disponible"
 
