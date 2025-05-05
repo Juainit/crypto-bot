@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import ccxt
+from decimal import Decimal, ROUND_UP
 from typing import Dict, Optional, Tuple, Any
 
 logger = logging.getLogger("KrakenBot")  
