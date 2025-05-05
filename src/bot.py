@@ -287,10 +287,14 @@ def handle_webhook():
     
     try:
         if action == 'buy':
-            success, order_id = bot.execute_buy(
-                data['symbol'],
-                float(data['trailing_stop'])
-            )
+            symbol = data['symbol']
+            trailing_cfg = float(data['trailing_stop'])
+            logger.info(f"🔔 Señal recibida para {symbol}")
+            if bot._state['active'] and bot._state['symbol'] == symbol:
+                logger.info(f"❌ Ya hay posición abierta para {symbol}")
+            else:
+                logger.info(f"✅ No hay posición abierta, ejecutando compra")
+            success, order_id = bot.execute_buy(symbol, trailing_cfg)
             if success:
                 Thread(target=bot.manage_orders, daemon=True).start()
                 return jsonify({
