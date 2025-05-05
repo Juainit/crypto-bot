@@ -94,8 +94,9 @@ class ExchangeClient:
                 raise ConnectionError("Fallo en prueba inicial: ticker no disponible")
 
             server_time = self.client.fetch_time()
-            if not isinstance(server_time.get('result', {}).get('unixtime'), int):
-                raise ValueError("Estructura de tiempo inválida en respuesta")
+            if not isinstance(server_time, (int, float)):
+                raise ValueError(f"Tiempo del servidor inválido: {server_time}")
+            logger.info(f"🕒 Tiempo del servidor Kraken: {server_time}")
 
             logger.info("✅ Conexión con Kraken validada exitosamente")
 
