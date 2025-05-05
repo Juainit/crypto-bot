@@ -87,7 +87,7 @@ class ExchangeClient:
                     raise
                 time.sleep(2 ** attempt)
 
-    def _validate_connection(self):
+    def validate_connection(self):
         try:
             if not self._light_check():
                 logger.error("❌ La prueba liviana falló: no se pudo obtener el ticker BTC/EUR")
