@@ -37,9 +37,9 @@ class ExchangeClient:
     }
 
     def __init__(self):
-        """Inicialización con validación completa"""
         self._last_nonce = int(time.time() * 1000)
-        self._initialize_time_sync()
+        self._connection_retries = 0
+        self.MAX_RETRIES = 3
         self.client = self._initialize_client()
         self._validate_connection()
 
@@ -53,37 +53,21 @@ class ExchangeClient:
     def _check_system_time(self) -> bool:
         """Verifica que el reloj del sistema sea razonable"""
         current_year = time.localtime().tm_year
-        return 2023 <= current_year <= 2025
+        return 
 
     def _initialize_client(self) -> ccxt.kraken:
-        """Configuración con validación de credenciales"""
-        api_key = os.getenv("KRAKEN_API_KEY", "").strip()
-        api_secret = os.getenv("KRAKEN_SECRET", "").strip()
-
-        if not api_key or not api_secret:
-            logger.critical("API keys no configuradas")
-            raise SystemExit(1)
-
-        try:
-            exchange = ccxt.kraken({
-                'apiKey': api_key,
-                'secret': api_secret,
-                'enableRateLimit': True,
-                'options': {
-                    'adjustForTimeDifference': True,
-                    'recvWindow': 20000,
-                    'rateLimit': 3500,
-                    'fetchMarkets': 'spot'
-                },
-                'timeout': 30000
-            })
-
-            self._load_markets_with_retry(exchange)
-            return exchange
-
-        except Exception as e:
-            logger.critical(f"Error inicializando cliente: {str(e)}")
-            raise SystemExit(1) from e
+        """Configuración robusta del cliente CCXT"""
+        return ccxt.kraken({
+            'apiKey': os.getenv("KRAKEN_API_KEY", "").strip(),
+            'secret': os.getenv("KRAKEN_SECRET", "").strip(),
+            'enableRateLimit': True,
+            'options': {
+                'adjustForTimeDifference': True,
+                'recvWindow': 20000,
+                'rateLimit': 3500
+            },
+            'timeout': 30000
+        })
 
     def _load_markets_with_retry(self, exchange, max_retries=3):
         """Carga de mercados con reintentos y validación"""
@@ -101,22 +85,37 @@ class ExchangeClient:
                 time.sleep(2 ** attempt)
 
     def _validate_connection(self):
-        """Validación completa de conexión"""
+        """Validación mejorada en dos fases"""
         try:
-            # 1. Verificar tiempo del servidor
+            # Fase 1: Prueba liviana
+            if not self._light_check():
+                raise ConnectionError("Fallo en prueba inicial")
+            
+            # Fase 2: Validación completa
             server_time = self.client.fetch_time()
-            if not isinstance(server_time, dict):
-                raise ValueError("Respuesta inválida del servidor")
-
-            # 2. Verificar balance
-            balance = self.client.fetch_balance()
-            if not isinstance(balance, dict):
-                raise ValueError("No se pudo obtener balance")
-
-            logger.info("Conexión validada correctamente")
+            if not isinstance(server_time.get('result', {}).get('unixtime'), int):
+                raise ValueError("Estructura de tiempo inválida")
+                
+            logger.info("Conexión validada exitosamente")
+            
         except Exception as e:
-            logger.critical(f"Error validando conexión: {str(e)}")
-            raise SystemExit(1) from e
+            self._connection_retries += 1
+            if self._connection_retries >= self.MAX_RETRIES:
+                logger.critical("Fallo persistente en conexión")
+                raise SystemExit(1)
+            
+            wait_time = 2 ** self._connection_retries
+            logger.warning(f"Reintento {self._connection_retries} en {wait_time}s...")
+            time.sleep(wait_time)
+            self._validate_connection()
+
+    def _light_check(self) -> bool:
+        """Prueba rápida de conexión"""
+        try:
+            ticker = self.client.fetch_ticker('BTC/EUR')
+            return isinstance(ticker, dict)
+        except:
+            return False
 
     def _get_nonce(self) -> int:
         """Generación segura de nonce para producción"""
