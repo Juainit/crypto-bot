@@ -19,7 +19,7 @@ class ExchangeClient:
     
     def __init__(self):
         self.client = self._initialize_client()
-        self._last_sync = 0
+        self._last_market_load = 0
         self.time_delta = 0
         
     def _initialize_client(self) -> ccxt.kraken:
@@ -32,7 +32,8 @@ class ExchangeClient:
                 'options': {
                     'adjustForTimeDifference': True,
                     'recvWindow': 15000,
-                    'rateLimit': 3000
+                    'rateLimit': 3000,
+                    'fetchMarkets': 'spot'  # Nueva opción crítica [4]
                 }
             })
             exchange.load_markets()  # Precarga los mercados
@@ -77,36 +78,44 @@ class ExchangeClient:
             return False
             
     def validate_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Valida símbolo y devuelve datos del mercado"""
+        """Valida símbolo y devuelve datos del mercado (CORREGIDO) [4][6]"""
         try:
+            # Forzar recarga de mercados cada 1 hora
+            if (time.time() - self._last_market_load) > 3600:
+                self.client.load_markets(reload=True)
+                self._last_market_load = time.time()
+            
+            normalized_symbol = self._normalize_symbol(symbol)
+            market = self.client.market(normalized_symbol)
+            
+            {
+                'id': market['id'],
+                'symbol': market['symbol'],
+                'limits': market['limits'],
+                'precision': market['precision'],
+                'active': market['active']
+            }
+            
+        except ccxt.BadSymbol as e:
             markets = self.client.load_markets()
-            normalized_symbol = symbol.upper().replace('-', '').replace('/', '')
-            
-            for market_id, market in markets.items():
-                if normalized_symbol == market.get('altname'):
-                    return {
-                        'id': market_id,
-                        'symbol': normalized_symbol,
-                        'limits': market.get('limits'),
-                        'precision': market.get('precision'),
-                        'active': market.get('active')
-                    }
-            
-            logger.error(f"Símbolo {symbol} no encontrado. Pares disponibles: {list(m['altname'] for m in markets.values())[:10]}")
+            available = [m['id'] for m in markets.values() if m['spot']]
+            logger.error(f"Símbolo {symbol} no válido. Pares disponibles: {available[:15]}...")
             return None
-            
         except Exception as e:
             logger.error(f"Error validando símbolo: {str(e)}", exc_info=True)
             return None
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        """Obtiene datos de mercado para un símbolo"""
+        """Obtiene datos de mercado para un símbolo (ACTUALIZADO) [4]"""
         try:
             normalized_symbol = self._normalize_symbol(symbol)
             return self.client.fetch_ticker(normalized_symbol)
         except ccxt.NetworkError as e:
             logger.error("Error obteniendo ticker: %s", str(e))
             raise
+        except ccxt.BadSymbol as e:
+            self.client.load_markets(reload=True)  # Recarga mercados
+            return self.client.fetch_ticker(normalized_symbol)
         except Exception as e:
             logger.error("Error inesperado en fetch_ticker: %s", str(e))
             raise
@@ -145,9 +154,26 @@ class ExchangeClient:
             raise
 
     def _normalize_symbol(self, symbol: str) -> str:
-        # Corregir mapeo STEPEUR (no existe en Kraken)
-        symbol = symbol.replace('STEPEUR', 'STEPS/EUR').upper()
-        return symbol.replace('/', '')  # Kraken usa formato XXXXZXXX
+        """Normalización profesional de símbolos (CORRECCIÓN CRÍTICA) [4][6]"""
+        symbol = symbol.upper().replace(' ', '').replace('-', '')
+        
+        # Mapeo de símbolos especiales
+        symbol_mappings = {
+            'REP/EUR': 'XREPZEUR',
+            'XREP/EUR': 'XREPZEUR',
+            'REP/USD': 'XREPZUSD',
+            'BTC/EUR': 'XXBTZEUR',
+            'ETH/EUR': 'XETHZEUR',
+            'STEP/EUR': 'STEPSZEUR'
+        }
+        
+        # Verificar mapeos directos
+        if symbol in symbol_mappings:
+            return symbol_mappings[symbol]
+        
+        # Lógica general para otros pares
+        base, quote = symbol.split('/') if '/' in symbol else (symbol[:3], symbol[3:])
+        return f"{base}{quote}"
 
     def _format_amount(self, amount: float, symbol: str) -> float:
         try:
@@ -160,11 +186,11 @@ class ExchangeClient:
             
             # Convertir a Decimal y redondear
             amount_dec = Decimal(str(amount)).quantize(
-                Decimal(10) ** -int(precision),  # Método profesional
+                Decimal(10) ** -int(precision),
                 rounding=ROUND_DOWN
             )
             
-            return float(amount_dec)  # <--- Variable correctamente definida
+            return float(amount_dec)
             
         except Exception as e:
             logger.error(f"Error formateando cantidad: {str(e)}")
