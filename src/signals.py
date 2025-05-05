@@ -32,16 +32,19 @@ class SignalProcessor:
             'required_fields': ['action', 'symbol', 'trailing_stop'],
             'action_values': ['buy', 'sell'],
             'trailing_stop_range': (0.001, 0.2),  # 0.1% a 20%
-            'symbol_blacklist': []  # Pares problemáticos [4]
+            'symbol_blacklist': ['TESTNET', 'FAKE']  # Pares problemáticos [4][6]
         }
 
     def process_signal(self, raw_signal: Dict) -> Optional[Dict]:
         """Procesamiento principal de señales"""
         try:
+            logger.debug("Señal recibida: %s", raw_signal)
+            
             if not self._validate_signal(raw_signal):
                 return None
                 
             normalized = self._normalize_signal(raw_signal)
+            logger.info("Señal normalizada: %s", normalized)
             
             if self._is_duplicate(normalized):
                 logger.warning("Señal duplicada ignorada")
@@ -72,7 +75,7 @@ class SignalProcessor:
             logger.error(f"Trailing stop fuera de rango: {trailing}")
             return False
             
-        # Validación de símbolos bloqueados [4]
+        # Validación de símbolos bloqueados [4][6]
         symbol = self._normalize_symbol(signal['symbol'])
         if symbol in self.validation_rules['symbol_blacklist']:
             logger.error(f"Símbolo bloqueado: {symbol}")
@@ -92,20 +95,33 @@ class SignalProcessor:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        """Convierte a formato altname de Kraken (ej: STEP/EUR → STEPEUR)"""
-        return symbol.upper().replace('-', '').replace('/', '')
+        """Convierte a formato compatible con Kraken (CORREGIDO) [4][6]"""
+        # Mapeo de símbolos especiales
+        symbol_mappings = {
+            'REP': 'XREP',    # Augur v1 → v2
+            'BTC': 'XXBT',    # Bitcoin
+            'ETH': 'XETH',    # Ethereum
+            'XDG': 'DOGE'     # Dogecoin
+        }
         
-        # Excepciones para pares con USD
-        if 'USD' in normalized and not normalized.endswith('USD'):
-            return f"{normalized.replace('USD', '')}/USD"
+        # Separar base y quote
+        parts = symbol.upper().replace('-', '/').split('/')
+        if len(parts) != 2:
+            return symbol.replace('/', '')
             
-        return normalized
+        base, quote = parts
+        base = symbol_mappings.get(base, base)
+        
+        return f"{base}{quote}"
 
     def _is_duplicate(self, signal: Dict) -> bool:
-        """Detección de señales duplicadas [8]"""
-        current_hash = hash(frozenset(signal.items()))
+        """Detección profesional de duplicados (MEJORADO) [6][8]"""
+        key_fields = (signal['symbol'], signal['action'], signal['trailing_stop'])
+        current_hash = hash(frozenset(key_fields))
+        
         if current_hash == self._last_processed.get(signal['symbol']):
             return True
+            
         self._last_processed[signal['symbol']] = current_hash
         return False
 

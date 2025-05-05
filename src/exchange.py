@@ -154,26 +154,22 @@ class ExchangeClient:
             raise
 
     def _normalize_symbol(self, symbol: str) -> str:
-        """Normalización profesional de símbolos (CORRECCIÓN CRÍTICA) [4][6]"""
-        symbol = symbol.upper().replace(' ', '').replace('-', '')
-        
-        # Mapeo de símbolos especiales
-        symbol_mappings = {
+        """Normalización profesional para pares de Kraken [4][6]"""
+        # Mapeo directo de símbolos complejos
+        kraken_symbols = {
             'REP/EUR': 'XREPZEUR',
-            'XREP/EUR': 'XREPZEUR',
-            'REP/USD': 'XREPZUSD',
+            'XREPZEUR': 'XREPZEUR',  # ← ¡Clave añadida!
             'BTC/EUR': 'XXBTZEUR',
-            'ETH/EUR': 'XETHZEUR',
-            'STEP/EUR': 'STEPSZEUR'
+            'ETH/EUR': 'XETHZEUR'
         }
-        
-        # Verificar mapeos directos
-        if symbol in symbol_mappings:
-            return symbol_mappings[symbol]
-        
-        # Lógica general para otros pares
-        base, quote = symbol.split('/') if '/' in symbol else (symbol[:3], symbol[3:])
-        return f"{base}{quote}"
+    
+        symbol = symbol.upper().replace(' ', '').replace('-', '')
+    
+        # Forzar recarga de mercados si no se encuentra
+        if symbol not in self.client.markets:
+            self.client.load_markets(reload=True)
+    
+        return kraken_symbols.get(symbol, symbol)
 
     def _format_amount(self, amount: float, symbol: str) -> float:
         try:
