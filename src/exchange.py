@@ -57,19 +57,26 @@ class ExchangeClient:
             yield last_nonce
 
     def _force_time_sync(self, client: ccxt.kraken):
-        """Sincronización horaria profesional"""
+        """Sincronización horaria profesional corregida"""
         try:
-            # Obtener tiempo REAL de Kraken (UTC)
-            server_time = client.fetch_time()['result']['unixtime']
+            # 1. Obtener respuesta completa de la API
+            time_response = client.fetch_time()
+            
+            # 2. Verificar estructura de la respuesta
+            if not isinstance(time_response, dict) or 'result' not in time_response:
+                raise ValueError("Respuesta inválida de Kraken")
+                
+            # 3. Extraer timestamp correctamente
+            server_time = time_response['result']['unixtime']  # Formato: 1746464939
             local_time = int(time.time())
             
-            if abs(server_time - local_time) > 5:  # Tolerancia 5s
-                logger.critical(f"Desincronización detectada: Server={server_time} | Local={local_time}")
-                raise ValueError("Diferencia horaria peligrosa")
-                
+            # 4. Calcular diferencia
+            self.time_delta = server_time - local_time
+            logger.info(f"Sincronizado | Diferencia: {self.time_delta}s")
+            
         except Exception as e:
-            logger.error(f"Error sincronizando: {str(e)}")
-            raise SystemExit(1)
+            logger.error(f"Error en sincronización: {str(e)}")
+            raise
 
     def validate_connection(self) -> bool:
         """Verifica la conexión con Kraken"""
