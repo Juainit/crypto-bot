@@ -288,7 +288,7 @@ def handle_webhook():
     try:
         if action == 'buy':
             symbol = data['symbol']
-            trailing_cfg = float(data['trailing_stop'])
+            trailing_cfg = float(data.get("trailing_stop") or data.get("trailing", {}).get("distance", 0.02))
             logger.info(f"🔔 Señal recibida para {symbol}")
             if bot._state['active'] and bot._state['symbol'] == symbol:
                 logger.info(f"❌ Ya hay posición abierta para {symbol}")
