@@ -95,14 +95,14 @@ class SignalProcessor:
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
-        """Convierte a formato compatible con Kraken (CORREGIDO) [4][6]"""
-        # Mapeo de símbolos especiales
-        symbol_mappings = {
-            'REP': 'XREP',    # Augur v1 → v2
-            'BTC': 'XXBT',    # Bitcoin
-            'ETH': 'XETH',    # Ethereum
-            'XDG': 'DOGE'     # Dogecoin
+        """Mapeo exacto requerido por Kraken [4][6]"""
+        kraken_symbols = {
+            'REP/EUR': 'XREPZEUR',
+            'XREP/EUR': 'XREPZEUR',
+            'REPZEUR': 'XREPZEUR',
+            'XREPZEUR': 'XREPZEUR'  # ← Clave crítica añadida
         }
+        return kraken_symbols.get(symbol.upper().replace(' ', ''), symbol.upper())
         
         # Separar base y quote
         parts = symbol.upper().replace('-', '/').split('/')

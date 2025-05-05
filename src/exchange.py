@@ -78,31 +78,29 @@ class ExchangeClient:
             return False
             
     def validate_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Valida símbolo y devuelve datos del mercado (CORREGIDO) [4][6]"""
+        """Versión definitiva validada con Kraken [4][6]"""
         try:
-            # Forzar recarga de mercados cada 1 hora
-            if (time.time() - self._last_market_load) > 3600:
+            # 1. Forzar recarga de mercados si hay error
+            if not self.client.markets or symbol not in self.client.markets:
                 self.client.load_markets(reload=True)
-                self._last_market_load = time.time()
             
-            normalized_symbol = self._normalize_symbol(symbol)
-            market = self.client.market(normalized_symbol)
+            # 2. Usar ID exacto del mercado
+            market = self.client.market(symbol)
             
-            {
+            # 3. Log de diagnóstico crítico
+            logger.debug("Mercados cargados: %s", list(self.client.markets.keys())[:20])
+            
+            return {
                 'id': market['id'],
-                'symbol': market['symbol'],
+                'symbol': market['symbol'],  # ← Usar símbolo oficial de Kraken
                 'limits': market['limits'],
                 'precision': market['precision'],
                 'active': market['active']
             }
             
-        except ccxt.BadSymbol as e:
-            markets = self.client.load_markets()
-            available = [m['id'] for m in markets.values() if m['spot']]
-            logger.error(f"Símbolo {symbol} no válido. Pares disponibles: {available[:15]}...")
-            return None
-        except Exception as e:
-            logger.error(f"Error validando símbolo: {str(e)}", exc_info=True)
+        except ccxt.BadSymbol:
+            logger.error("PAR NO ENCONTRADO. Requiere: 'XREPZEUR' | Disponibles: %s", 
+                    [k for k in self.client.markets.keys() if 'XREP' in k])
             return None
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
