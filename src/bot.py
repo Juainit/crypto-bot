@@ -262,6 +262,9 @@ def handle_webhook():
             symbol = data['symbol']
             trailing_cfg = float(data.get("trailing_stop", 0.02))
             logger.info(f"🔔 Señal recibida para {symbol}")
+            # Normalización y obtención del mercado
+            normalized = exchange_client._normalize_symbol(symbol)
+            market = exchange_client.client.market(normalized)
             if bot._state['active'] and bot._state['symbol'] == symbol:
                 logger.info(f"❌ Ya hay posición abierta para {symbol}")
             else:
