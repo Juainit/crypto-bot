@@ -19,7 +19,6 @@ if not logger.handlers:
 class ExchangeClient:
     """Cliente profesional para Kraken con validaciones completas y listo para producción"""
 
-    # Mapeo completo de símbolos (actualizado 2024)
     SYMBOL_MAPPING = {
         'REP/EUR': 'XREPZEUR',
         'BTC/EUR': 'XXBTZEUR',
@@ -29,7 +28,6 @@ class ExchangeClient:
         'DOT/EUR': 'DOTEUR'
     }
 
-    # Precisión mínima por tipo de activo (backup)
     MIN_PRECISION = {
         'BTC/EUR': {'amount': 8, 'price': 1},
         'ETH/EUR': {'amount': 6, 'price': 2},
@@ -44,22 +42,27 @@ class ExchangeClient:
         self._validate_connection()
 
     def _initialize_time_sync(self):
-        """Sincronización horaria robusta"""
         self.time_delta = 0
         if not self._check_system_time():
             logger.critical("El reloj del sistema está desincronizado")
             raise SystemExit(1)
 
     def _check_system_time(self) -> bool:
-        """Verifica que el reloj del sistema sea razonable"""
         current_year = time.localtime().tm_year
-        return 
+        return 2020 <= current_year <= 2100
 
     def _initialize_client(self) -> ccxt.kraken:
-        """Configuración robusta del cliente CCXT"""
+        api_key = os.getenv("KRAKEN_API_KEY", "").strip()
+        api_secret = os.getenv("KRAKEN_SECRET", "").strip()
+
+        if not api_key or not api_secret:
+            logger.critical("❌ Faltan las variables de entorno KRAKEN_API_KEY o KRAKEN_SECRET")
+        else:
+            logger.info("✅ Claves de API Kraken cargadas")
+
         return ccxt.kraken({
-            'apiKey': os.getenv("KRAKEN_API_KEY", "").strip(),
-            'secret': os.getenv("KRAKEN_SECRET", "").strip(),
+            'apiKey': api_key,
+            'secret': api_secret,
             'enableRateLimit': True,
             'options': {
                 'adjustForTimeDifference': True,
@@ -70,113 +73,94 @@ class ExchangeClient:
         })
 
     def _load_markets_with_retry(self, exchange, max_retries=3):
-        """Carga de mercados con reintentos y validación"""
         for attempt in range(max_retries):
             try:
                 exchange.load_markets()
                 if not exchange.markets:
                     raise ValueError("Mercados no cargados correctamente")
-                logger.info(f"Mercados cargados ({len(exchange.markets)} pares)")
+                logger.info(f"✅ Mercados cargados ({len(exchange.markets)} pares)")
                 return
             except Exception as e:
+                logger.warning(f"Error al cargar mercados (intento {attempt+1}): {str(e)}")
                 if attempt == max_retries - 1:
-                    logger.critical("Fallo al cargar mercados")
+                    logger.critical(f"Fallo al cargar mercados tras {max_retries} intentos")
                     raise
                 time.sleep(2 ** attempt)
 
     def _validate_connection(self):
-        """Validación mejorada en dos fases"""
         try:
-            # Fase 1: Prueba liviana
             if not self._light_check():
-                raise ConnectionError("Fallo en prueba inicial")
-            
-            # Fase 2: Validación completa
+                logger.error("❌ La prueba liviana falló: no se pudo obtener el ticker BTC/EUR")
+                raise ConnectionError("Fallo en prueba inicial: ticker no disponible")
+
             server_time = self.client.fetch_time()
             if not isinstance(server_time.get('result', {}).get('unixtime'), int):
-                raise ValueError("Estructura de tiempo inválida")
-                
-            logger.info("Conexión validada exitosamente")
-            
+                raise ValueError("Estructura de tiempo inválida en respuesta")
+
+            logger.info("✅ Conexión con Kraken validada exitosamente")
+
         except Exception as e:
             self._connection_retries += 1
+            logger.error(f"Detalles del error de conexión: {str(e)}")
             if self._connection_retries >= self.MAX_RETRIES:
-                logger.critical("Fallo persistente en conexión")
+                logger.critical("Fallo persistente en conexión. Terminando.")
                 raise SystemExit(1)
-            
+
             wait_time = 2 ** self._connection_retries
             logger.warning(f"Reintento {self._connection_retries} en {wait_time}s...")
             time.sleep(wait_time)
             self._validate_connection()
 
     def _light_check(self) -> bool:
-        """Prueba rápida de conexión"""
         try:
             ticker = self.client.fetch_ticker('BTC/EUR')
             return isinstance(ticker, dict)
-        except:
+        except Exception as e:
+            logger.debug(f"Excepción en _light_check: {str(e)}")
             return False
 
     def _get_nonce(self) -> int:
-        """Generación segura de nonce para producción"""
         current_nonce = int(time.time() * 1000)
         self._last_nonce = max(current_nonce, self._last_nonce + 1)
         return self._last_nonce
 
     def _normalize_symbol(self, symbol: str) -> str:
-        """Normalización profesional con validación completa"""
         original_symbol = symbol
         symbol = symbol.upper().strip().replace('-', '/')
 
-        # 1. Verificar mapeo directo
         if symbol in self.SYMBOL_MAPPING:
             return self.SYMBOL_MAPPING[symbol]
 
-        # 2. Verificar formato básico
         if '/' not in symbol:
             raise ValueError(f"Símbolo mal formado: {original_symbol}")
 
-        # 3. Buscar en mercados cargados
         if symbol in self.client.markets:
             return symbol
 
-        # 4. Intentar variantes
         for market_symbol in self.client.markets:
             if symbol.replace('/', '') == market_symbol.replace('/', ''):
                 return market_symbol
 
-        # 5. Error detallado
         available = [k for k in self.client.markets.keys() if symbol.split('/')[0] in k]
         raise ValueError(
-            f"Símbolo no soportado: {original_symbol}. "
-            f"Disponibles: {available[:10]}..."
+            f"Símbolo no soportado: {original_symbol}. Disponibles: {available[:10]}..."
         )
 
     def _validate_order_params(self, symbol: str, amount: float, price: float):
-        """Validación profesional de parámetros de orden"""
         market = self.client.market(symbol)
-        
-        # Validar cantidad mínima
+
         min_amount = float(market['limits']['amount']['min'])
         if amount < min_amount:
-            raise ValueError(
-                f"Cantidad {amount} menor al mínimo {min_amount} para {symbol}"
-            )
+            raise ValueError(f"Cantidad {amount} menor al mínimo {min_amount} para {symbol}")
 
-        # Validar incremento de cantidad
         if 'amount' in market['precision']:
             step = float(market['precision']['amount'])
             if (amount / step) != int(amount / step):
-                raise ValueError(
-                    f"Cantidad {amount} no cumple incremento de {step} para {symbol}"
-                )
+                raise ValueError(f"Cantidad {amount} no cumple incremento de {step} para {symbol}")
 
-        # Validar precio mínimo
         min_price = float(market['limits']['price']['min'])
         if price < min_price:
-            raise ValueError(
-                f"Precio {price} menor al mínimo {min_price} para {symbol}"
-            )
+            raise ValueError(f"Precio {price} menor al mínimo {min_price} para {symbol}")
 
     def create_limit_order(
         self,
@@ -186,8 +170,6 @@ class ExchangeClient:
         price: float,
         max_retries: int = 3
     ) -> Dict[str, Any]:
-        """Método profesional para órdenes limitadas"""
-        # Validación inicial
         side = side.lower()
         if side not in ('buy', 'sell'):
             raise ValueError("Lado de orden inválido (debe ser 'buy' o 'sell')")
@@ -195,7 +177,6 @@ class ExchangeClient:
         normalized_symbol = self._normalize_symbol(symbol)
         self._validate_order_params(normalized_symbol, amount, price)
 
-        # Reintentos profesionales
         for attempt in range(max_retries):
             try:
                 order = self.client.create_order(
@@ -225,8 +206,6 @@ class ExchangeClient:
             except Exception as e:
                 logger.error(f"Error inesperado: {str(e)}")
                 raise
-
-    # Métodos adicionales (create_market_order, fetch_ticker, etc.) con el mismo nivel de validación
 
 # Instancia global con manejo de errores
 try:
