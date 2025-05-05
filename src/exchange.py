@@ -50,9 +50,9 @@ class ExchangeClient:
 
     def _nonce_generator(self):
         """Generador de nonce profesional sincronizado con Kraken"""
-        last_nonce = int((time.time() * 1000) + self.time_delta  # <--- ¡Clave!
-        while True:
-            current_time = int((time.time() * 1000) + self.time_delta
+        last_nonce = int(time.time() * 1000)
+        while True:  # <-- ¡Corregido!
+            current_time = int(time.time() * 1000)
             last_nonce = max(last_nonce + 1, current_time)
             yield last_nonce
 
@@ -63,7 +63,7 @@ class ExchangeClient:
             local_time = int(time.time() * 1000)
             self.time_delta = server_time - local_time
             logger.info(f"Diferencia horaria ajustada: {self.time_delta}ms")
-    except Exception as e:
+        except Exception as e:
             logger.error(f"Error sincronizando tiempo: {str(e)}")
             self.time_delta = 0
 
