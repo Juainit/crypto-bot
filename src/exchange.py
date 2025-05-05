@@ -49,12 +49,10 @@ class ExchangeClient:
             raise
 
     def _nonce_generator(self):
-        """Generador de nonce compatible con Kraken (UTC+0)"""
-        last_nonce = int(time.time() * 1000)  # Usar UTC, no local
+        """Generador compatible con Kraken"""
+        last_nonce = int(time.time() + self.time_delta) * 1000
         while True:
-            current_time = int(time.time() * 1000)
-            last_nonce = max(last_nonce + 1, current_time)
-            yield last_nonce
+            yield last_nonce + 1
 
     def _force_time_sync(self, client: ccxt.kraken):
         """Sincronización horaria profesional corregida"""
