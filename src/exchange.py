@@ -49,23 +49,23 @@ class ExchangeClient:
             raise
 
     def _nonce_generator(self):
-        """Generador de nonce a prueba de colisiones"""
-        last_nonce = int(time.time() * 1000)
+        """Generador de nonce profesional sincronizado con Kraken"""
+        last_nonce = int((time.time() * 1000) + self.time_delta  # <--- ¡Clave!
         while True:
-            current_time = int(time.time() * 1000)
+            current_time = int((time.time() * 1000) + self.time_delta
             last_nonce = max(last_nonce + 1, current_time)
             yield last_nonce
 
     def _force_time_sync(self, client: ccxt.kraken):
-        """Sincronización horaria con Kraken"""
+        """Sincronización horaria mejorada [4]"""
         try:
-            server_time = client.fetch_time()
+            server_time = client.fetch_time()['timestamp'] * 1000  # Tiempo en ms
             local_time = int(time.time() * 1000)
             self.time_delta = server_time - local_time
-            logger.debug("Diferencia horaria con Kraken: %dms", self.time_delta)
-        except ccxt.NetworkError as e:
-            logger.error("Fallo en sincronización horaria: %s", str(e))
-            raise
+            logger.info(f"Diferencia horaria ajustada: {self.time_delta}ms")
+    except Exception as e:
+            logger.error(f"Error sincronizando tiempo: {str(e)}")
+            self.time_delta = 0
 
     def validate_connection(self) -> bool:
         """Verifica la conexión con Kraken"""
