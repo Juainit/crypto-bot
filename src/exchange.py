@@ -49,23 +49,27 @@ class ExchangeClient:
             raise
 
     def _nonce_generator(self):
-        """Generador de nonce profesional sincronizado con Kraken"""
-        last_nonce = int(time.time() * 1000)
-        while True:  # <-- ¡Corregido!
+        """Generador de nonce compatible con Kraken (UTC+0)"""
+        last_nonce = int(time.time() * 1000)  # Usar UTC, no local
+        while True:
             current_time = int(time.time() * 1000)
             last_nonce = max(last_nonce + 1, current_time)
             yield last_nonce
 
     def _force_time_sync(self, client: ccxt.kraken):
-        """Sincronización horaria mejorada [4]"""
+        """Sincronización horaria profesional"""
         try:
-            server_time = client.fetch_time()['timestamp'] * 1000  # Tiempo en ms
-            local_time = int(time.time() * 1000)
-            self.time_delta = server_time - local_time
-            logger.info(f"Diferencia horaria ajustada: {self.time_delta}ms")
+            # Obtener tiempo REAL de Kraken (UTC)
+            server_time = client.fetch_time()['result']['unixtime']
+            local_time = int(time.time())
+            
+            if abs(server_time - local_time) > 5:  # Tolerancia 5s
+                logger.critical(f"Desincronización detectada: Server={server_time} | Local={local_time}")
+                raise ValueError("Diferencia horaria peligrosa")
+                
         except Exception as e:
-            logger.error(f"Error sincronizando tiempo: {str(e)}")
-            self.time_delta = 0
+            logger.error(f"Error sincronizando: {str(e)}")
+            raise SystemExit(1)
 
     def validate_connection(self) -> bool:
         """Verifica la conexión con Kraken"""
