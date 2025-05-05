@@ -191,7 +191,7 @@ class ExchangeClient:
             raise
 
     def _format_price(self, price: float, symbol: str) -> float:
-        """Ajuste profesional de precisión [4]"""
+        """Ajuste profesional de precisión"""
         market = self.client.market(symbol)
         precision = int(market['precision']['price'])  # ← Conversión crítica
         return float(round(Decimal(str(price)), precision))
