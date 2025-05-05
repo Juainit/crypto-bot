@@ -39,7 +39,7 @@ class ExchangeClient:
         self._connection_retries = 0
         self.MAX_RETRIES = 3
         self.client = self._initialize_client()
-        self._validate_connection()
+        self.validate_connection()
 
     def _initialize_time_sync(self):
         self.time_delta = 0
@@ -110,7 +110,7 @@ class ExchangeClient:
             wait_time = 2 ** self._connection_retries
             logger.warning(f"Reintento {self._connection_retries} en {wait_time}s...")
             time.sleep(wait_time)
-            self._validate_connection()
+            self.validate_connection()
 
     def _light_check(self) -> bool:
         try:
