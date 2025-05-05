@@ -145,11 +145,9 @@ class ExchangeClient:
             raise
 
     def _normalize_symbol(self, symbol: str) -> str:
-        """Normaliza símbolos a formato Kraken (STEPEUR -> STEP/EUR)"""
-        symbol = symbol.upper().replace('-', '')
-        if len(symbol) > 3:  # Convierte STEPEUR -> STEP/EUR
-            return f"{symbol[:-3]}/{symbol[-3:]}"
-        return symbol
+        # Corregir mapeo STEPEUR (no existe en Kraken)
+        symbol = symbol.replace('STEPEUR', 'STEPS/EUR').upper()
+        return symbol.replace('/', '')  # Kraken usa formato XXXXZXXX
 
     def _format_amount(self, amount: float, symbol: str) -> float:
         try:
