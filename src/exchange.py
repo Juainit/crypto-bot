@@ -19,15 +19,6 @@ if not logger.handlers:
 class ExchangeClient:
     """Cliente profesional para Kraken con validaciones completas y listo para producción"""
 
-    SYMBOL_MAPPING = {
-        'REP/EUR': 'XREPZEUR',
-        'BTC/EUR': 'XXBTZEUR',
-        'ETH/EUR': 'XETHZEUR',
-        'ADA/EUR': 'ADAEUR',
-        'SOL/EUR': 'SOLEUR',
-        'DOT/EUR': 'DOTEUR'
-    }
-
     MIN_PRECISION = {
         'BTC/EUR': {'amount': 8, 'price': 1},
         'ETH/EUR': {'amount': 6, 'price': 2},
@@ -39,6 +30,11 @@ class ExchangeClient:
         self._connection_retries = 0
         self.MAX_RETRIES = 3
         self.client = self._initialize_client()
+        self._load_markets_with_retry(self.client)
+        self.SYMBOL_MAPPING = {
+            f"{v['base']}/{v['quote']}": k
+            for k, v in self.client.markets.items()
+        }
         self.validate_connection()
 
     def _initialize_time_sync(self):
@@ -192,6 +188,53 @@ class ExchangeClient:
                 logger.info(
                     f"Orden {order['id']} creada | {normalized_symbol} | "
                     f"{side.upper()} {amount} @ {price}"
+                )
+                return order
+
+            except ccxt.InvalidNonce:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(1)
+            except ccxt.NetworkError as e:
+                logger.warning(f"Error de red (reintento {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(2 ** attempt)
+            except Exception as e:
+                logger.error(f"Error inesperado: {str(e)}")
+                raise
+
+    def create_market_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        max_retries: int = 3
+    ) -> Dict[str, Any]:
+        side = side.lower()
+        if side not in ('buy', 'sell'):
+            raise ValueError("Lado de orden inválido (debe ser 'buy' o 'sell')")
+
+        normalized_symbol = self._normalize_symbol(symbol)
+        market = self.client.market(normalized_symbol)
+
+        min_amount = float(market['limits']['amount']['min'])
+        if amount < min_amount:
+            raise ValueError(f"Cantidad {amount} menor al mínimo {min_amount} para {symbol}")
+
+        for attempt in range(max_retries):
+            try:
+                order = self.client.create_order(
+                    symbol=normalized_symbol,
+                    type='market',
+                    side=side,
+                    amount=amount,
+                    params={'nonce': self._get_nonce()}
+                )
+
+                logger.info(
+                    f"Orden de mercado {order['id']} ejecutada | {normalized_symbol} | "
+                    f"{side.upper()} {amount}"
                 )
                 return order
 
