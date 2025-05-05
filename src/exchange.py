@@ -2,7 +2,7 @@ import os
 import time
 import logging
 import ccxt
-from decimal import Decimal, ROUND_UP
+from decimal import Decimal, ROUND_UP, ROUND_DOWN
 from typing import Dict, Optional, Tuple, Any
 
 logger = logging.getLogger("KrakenBot")  
@@ -154,14 +154,19 @@ class ExchangeClient:
     def _format_amount(self, amount: float, symbol: str) -> float:
         try:
             market = self.client.market(symbol)
-            precision = market['precision']['amount']
             
-            # Convertir a Decimal para redondeo preciso
+            # Obtener precisión correctamente
+            precision = market['precision']['amount']
+            if isinstance(precision, (list, tuple)):
+                precision = precision[1]  # Índice 1 para precisión de cantidad
+            
+            # Convertir a Decimal y redondear
             amount_dec = Decimal(str(amount)).quantize(
-                Decimal('1.' + '0'*precision),
-                rounding=ROUND_UP
+                Decimal(10) ** -int(precision),  # Método profesional
+                rounding=ROUND_DOWN
             )
-            return float(amount_dec)
+            
+            return float(amount_dec)  # <--- Variable correctamente definida
             
         except Exception as e:
             logger.error(f"Error formateando cantidad: {str(e)}")
