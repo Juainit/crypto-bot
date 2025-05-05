@@ -187,34 +187,6 @@ class TradingBot:
             logger.critical(f"Error en venta: {str(e)}", exc_info=True)
             return False, str(e)
 
-    @synchronized('_lock')
-    def manage_orders(self):
-        """Gestión activa de órdenes con trailing stop"""
-        logger.info("Iniciando monitorización de posiciones")
-        while not self._shutdown_event.is_set():
-            try:
-                if not self._state['active']:
-                    time.sleep(15)
-                    continue
-                
-                # Lógica de trailing stop actualizada
-                ticker = exchange_client.fetch_ticker(self._state['symbol'])
-                current_price = Decimal(str(ticker['last']))
-                new_stop = current_price * (1 - self._state['trailing_stop'])
-                
-                # Actualización dinámica del stop
-                if new_stop > self._state.get('current_stop', Decimal('0')):
-                    exchange_client.update_order(
-                        order_id=self._state['order_id'],
-                        new_stop=float(new_stop))
-                    self._state['current_stop'] = new_stop
-                    logger.info(f"Trailing actualizado: {new_stop:.8f}")
-                
-                time.sleep(30)
-                
-            except Exception as e:
-                logger.error(f"Error en monitorización: {str(e)}")
-                time.sleep(60)
     def manage_orders(self):
         """Gestión activa de órdenes con trailing stop"""
         logger.info("Iniciando monitorización de posiciones")
@@ -288,7 +260,7 @@ def handle_webhook():
     try:
         if action == 'buy':
             symbol = data['symbol']
-            trailing_cfg = float(data.get("trailing_stop") or data.get("trailing", {}).get("distance", 0.02))
+            trailing_cfg = float(data.get("trailing_stop", 0.02))
             logger.info(f"🔔 Señal recibida para {symbol}")
             if bot._state['active'] and bot._state['symbol'] == symbol:
                 logger.info(f"❌ Ya hay posición abierta para {symbol}")
