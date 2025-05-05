@@ -55,26 +55,37 @@ class ExchangeClient:
             yield last_nonce + 1
 
     def _force_time_sync(self, client: ccxt.kraken):
-        """Sincronización horaria profesional corregida"""
+        """Sincronización horaria robusta con manejo de errores"""
         try:
-            # 1. Obtener respuesta completa de la API
-            time_response = client.fetch_time()
+            # 1. Obtener respuesta de la API
+            response = client.fetch_time()
             
-            # 2. Verificar estructura de la respuesta
-            if not isinstance(time_response, dict) or 'result' not in time_response:
-                raise ValueError("Respuesta inválida de Kraken")
+            # 2. Debug: Registrar respuesta completa
+            logger.debug(f"Respuesta de Kraken: {response}")
+            
+            # 3. Validar estructura de respuesta
+            if not isinstance(response, dict):
+                raise ValueError("La respuesta no es un diccionario")
                 
-            # 3. Extraer timestamp correctamente
-            server_time = time_response['result']['unixtime']  # Formato: 1746464939
+            if 'error' in response and response['error']:
+                raise ValueError(f"Error de Kraken: {response['error']}")
+                
+            if 'result' not in response or 'unixtime' not in response['result']:
+                raise ValueError("Estructura de respuesta inválida")
+            
+            # 4. Extraer timestamp
+            server_time = response['result']['unixtime']
             local_time = int(time.time())
             
-            # 4. Calcular diferencia
+            # 5. Calcular diferencia
             self.time_delta = server_time - local_time
-            logger.info(f"Sincronizado | Diferencia: {self.time_delta}s")
+            logger.info(f"Sincronización exitosa. Diferencia: {self.time_delta}s")
             
         except Exception as e:
-            logger.error(f"Error en sincronización: {str(e)}")
-            raise
+            logger.error(f"Fallo en sincronización: {str(e)}")
+            # Modo fallback: continuar sin sincronización
+            self.time_delta = 0
+            logger.warning("Usando diferencia horaria = 0 (modo fallback)")
 
     def validate_connection(self) -> bool:
         """Verifica la conexión con Kraken"""
