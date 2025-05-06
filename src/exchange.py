@@ -226,6 +226,12 @@ class ExchangeClient:
                     raise
                 time.sleep(2 ** attempt)
             except Exception as e:
+                if "520" in str(e):
+                    logger.warning("⚠️ Error 520 detectado. Esperando 60s para reintentar...")
+                    time.sleep(60)
+                    if attempt < max_retries - 1:
+                        continue
+                logger.debug(f"Contenido de error completo: {str(e)}")
                 logger.error(f"Error inesperado: {str(e)}")
                 raise
 
@@ -277,6 +283,12 @@ class ExchangeClient:
                     raise
                 time.sleep(2 ** attempt)
             except Exception as e:
+                if "520" in str(e):
+                    logger.warning("⚠️ Error 520 detectado. Esperando 60s para reintentar...")
+                    time.sleep(60)
+                    if attempt < max_retries - 1:
+                        continue
+                logger.debug(f"Contenido de error completo: {str(e)}")
                 logger.error(f"Error inesperado: {str(e)}")
                 raise
 
