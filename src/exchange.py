@@ -182,139 +182,49 @@ class ExchangeClient:
             logger.error(f"Error al ajustar amount para {symbol}: {e}")
             raise
 
-    def create_limit_order(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        price: float,
-        max_retries: int = 3
-    ) -> Dict[str, Any]:
-        side = side.lower()
-        if side not in ('buy', 'sell'):
-            raise ValueError("Lado de orden inválido (debe ser 'buy' o 'sell')")
+    def create_limit_order(self, symbol: str, side: str, amount: float, price: float, trailing_stop: float = None):
+        """
+        Ejecuta una orden limitada.
+        """
+        from decimal import Decimal
+        symbol_norm = self._normalize_symbol(symbol)
+        order = self.client.create_order(symbol_norm, 'limit', side, amount, price)
 
-        normalized_symbol = self._normalize_symbol(symbol)
-        amount = self._adjust_amount_to_step(amount, normalized_symbol)
-        self._validate_order_params(normalized_symbol, amount, price)
-
-        for attempt in range(max_retries):
-            try:
-                self.client.verbose = True
-                order = self.client.create_order(
-                    symbol=normalized_symbol,
-                    type='limit',
-                    side=side,
-                    amount=amount,
-                    price=price
-                )
-                self.client.verbose = False
-
-                logger.info(
-                    f"Orden {order['id']} creada | {normalized_symbol} | "
-                    f"{side.upper()} {amount} @ {price}"
-                )
-                return order
-
-            except ccxt.InvalidNonce:
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(1)
-            except ccxt.NetworkError as e:
-                logger.warning(f"Error de red (reintento {attempt + 1}/{max_retries}): {str(e)}")
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(2 ** attempt)
-            except Exception as e:
-                if "520" in str(e):
-                    logger.warning("⚠️ Error 520 detectado. Esperando 60s para reintentar...")
-                    time.sleep(60)
-                    if attempt < max_retries - 1:
-                        continue
-                logger.debug(f"Contenido de error completo: {str(e)}")
-                logger.error(f"Error inesperado: {str(e)}")
-                raise
-
-    def create_market_order(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        trailing_stop: Optional[float] = None,
-        max_retries: int = 3
-    ) -> Dict[str, Any]:
-        side = side.lower()
-        if side not in ('buy', 'sell'):
-            raise ValueError("Lado de orden inválido (debe ser 'buy' o 'sell')")
-
-        normalized_symbol = self._normalize_symbol(symbol)
-        amount = self._adjust_amount_to_step(amount, normalized_symbol)
-        self._validate_order_params(normalized_symbol, amount, price=1.0)
-        market = self.client.market(normalized_symbol)
-
-        min_amount = float(market['limits']['amount']['min'])
-        if amount < min_amount:
-            raise ValueError(f"Cantidad {amount} menor al mínimo {min_amount} para {symbol}")
-
-        # Preparar parámetros de cierre con trailing stop si se solicita
-        params: Dict[str, Any] = {}
         if trailing_stop is not None:
-            # Obtener precio actual para calcular offset
-            ticker = self.client.fetch_ticker(normalized_symbol)
-            last_price = ticker.get('last') or ticker.get('close', {}).get('last')
-            if last_price is None:
-                raise ValueError("No se pudo obtener el precio actual para trailing stop")
-            # Calcular offset: porcentaje si <1, valor absoluto en caso contrario
-            if float(trailing_stop) < 1:
-                offset_value = Decimal(str(trailing_stop)) * Decimal(str(last_price))
-            else:
-                offset_value = Decimal(str(trailing_stop))
-            # Ajustar precision de price
-            price_prec = self.client.market(normalized_symbol)['precision']['price']
-            step = Decimal('1') / (Decimal('10') ** price_prec)
-            offset = offset_value.quantize(step, rounding=ROUND_UP)
-            offset_str = str(offset)
-            params['close[ordertype]'] = 'trailing-stop'
-            params['close[price]'] = offset_str
-            logger.info(f"✅ Orden de mercado con trailing stop establecido: {side.upper()} {amount} {normalized_symbol}, offset={offset_str}")
+            # mismo procedimiento de offset
+            ticker = self.client.fetch_ticker(symbol_norm)
+            ref_price = Decimal(str(ticker['last']))
+            offset = (ref_price * Decimal(str(trailing_stop))).quantize(Decimal('0.00000001'))
+            self.client.create_order(symbol_norm, 'stop-loss-trailing', 'sell', amount, float(offset))
+        return order
 
-        for attempt in range(max_retries):
-            try:
-                self.client.verbose = True
-                order = self.client.create_order(
-                    symbol=normalized_symbol,
-                    type='market',
-                    side=side,
-                    amount=amount,
-                    price=None,
-                    params=params
-                )
-                self.client.verbose = False
+    def create_market_order(self, symbol: str, side: str, amount: float, trailing_stop: float = None):
+        """
+        Ejecuta una orden de mercado.
+        """
+        from decimal import Decimal
+        symbol_norm = self._normalize_symbol(symbol)
 
-                logger.info(
-                    f"Orden de mercado {order['id']} ejecutada | {normalized_symbol} | "
-                    f"{side.upper()} {amount}"
-                )
-                return order
+        # 1) colocamos la orden de mercado
+        order = self.client.create_order(symbol_norm, 'market', side, amount)
 
-            except ccxt.InvalidNonce:
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(1)
-            except ccxt.NetworkError as e:
-                logger.warning(f"Error de red (reintento {attempt + 1}/{max_retries}): {str(e)}")
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(2 ** attempt)
-            except Exception as e:
-                if "520" in str(e):
-                    logger.warning("⚠️ Error 520 detectado. Esperando 60s para reintentar...")
-                    time.sleep(60)
-                    if attempt < max_retries - 1:
-                        continue
-                logger.debug(f"Contenido de error completo: {str(e)}")
-                logger.error(f"Error inesperado: {str(e)}")
-                raise
+        # 2) si vienen parámetros de trailing, colocamos la orden stop-loss-trailing
+        if trailing_stop is not None:
+            # traemos el precio de referencia (último)
+            ticker = self.client.fetch_ticker(symbol_norm)
+            ref_price = Decimal(str(ticker['last']))
+            # offset absoluto = precio_actual * porcentaje_trailing
+            offset = (ref_price * Decimal(str(trailing_stop))).quantize(Decimal('0.00000001'))
+            # colocamos la orden de trailing stop (venta)
+            self.client.create_order(
+                symbol_norm,
+                'stop-loss-trailing',   # CCXT lo mapea a ordertype=stop-loss-trailing
+                'sell',
+                amount,
+                float(offset),          # Kraken espera offset en unidades de precio
+            )
+
+        return order
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         normalized_symbol = self._normalize_symbol(symbol)
