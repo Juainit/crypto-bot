@@ -3,13 +3,12 @@ import time
 import logging
 
 from .database import DatabaseManager
-from .exchange import KrakenClient
+from .exchange import exchange_client
 from . import config
 
 logger = logging.getLogger(__name__)
 
 db_manager = DatabaseManager()
-exchange_client = KrakenClient(api_key=config.KRAKEN_API_KEY, secret=config.KRAKEN_SECRET)
 
 class Watcher:
     def __init__(self, interval: float = config.WATCH_INTERVAL):
