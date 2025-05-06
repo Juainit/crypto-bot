@@ -159,6 +159,14 @@ class ExchangeClient:
         if price < min_price:
             raise ValueError(f"Precio {price} menor al mínimo {min_price} para {symbol}")
 
+    def _adjust_amount_to_step(self, amount: float, symbol: str) -> float:
+        market = self.client.market(symbol)
+        precision = market['precision'].get('amount', 8)
+        step = Decimal("1e-" + str(precision))
+        amt = Decimal(str(amount)).quantize(step, rounding=ROUND_DOWN)
+        logger.debug(f"Cantidad ajustada para {symbol}: {amt}")
+        return float(amt)
+
     def create_limit_order(
         self,
         symbol: str,
@@ -172,6 +180,7 @@ class ExchangeClient:
             raise ValueError("Lado de orden inválido (debe ser 'buy' o 'sell')")
 
         normalized_symbol = self._normalize_symbol(symbol)
+        amount = self._adjust_amount_to_step(amount, normalized_symbol)
         self._validate_order_params(normalized_symbol, amount, price)
 
         for attempt in range(max_retries):
@@ -216,6 +225,7 @@ class ExchangeClient:
             raise ValueError("Lado de orden inválido (debe ser 'buy' o 'sell')")
 
         normalized_symbol = self._normalize_symbol(symbol)
+        amount = self._adjust_amount_to_step(amount, normalized_symbol)
         market = self.client.market(normalized_symbol)
 
         min_amount = float(market['limits']['amount']['min'])
