@@ -240,6 +240,7 @@ class ExchangeClient:
 
         normalized_symbol = self._normalize_symbol(symbol)
         amount = self._adjust_amount_to_step(amount, normalized_symbol)
+        self._validate_order_params(normalized_symbol, amount, price=1.0)
         market = self.client.market(normalized_symbol)
 
         min_amount = float(market['limits']['amount']['min'])
