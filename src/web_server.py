@@ -177,7 +177,8 @@ class TradingEngine:
                     'size': amount,
                     'trailing_stop': Decimal(str(trailing_stop)),
                     'capital': Decimal('0'),
-                    'last_update': time.time()
+                    'last_update': time.time(),
+                    'max_price': price,  # Inicializar max_price con entry price
                 })
                 
                 # Persistir en DB
@@ -205,7 +206,7 @@ class TradingEngine:
             return False, str(e)
 
     def _manage_position(self):
-        """Monitorización activa de la posición"""
+        """Monitorización activa de la posición con trailing stop basado en max_price"""
         logger.info("Iniciando monitorización de posición para %s", self._state['symbol'])
         while self._state['active'] and not self._shutdown_event.is_set():
             try:
@@ -214,28 +215,24 @@ class TradingEngine:
                     logger.warning("Timeout de posición, liquidando...")
                     self.execute_sell()
                     break
-                
-                # Obtener precio actual
-                ticker = exchange_client.fetch_ticker(self._state['symbol'])
-                current_price = Decimal(str(ticker['last']))
-                
-                # Verificar stop loss
-                stop_price = self._state['entry_price'] * (1 - self._state['trailing_stop'])
+
+                # Update maximum price seen since entry
+                current_price = Decimal(str(exchange_client.fetch_ticker(self._state['symbol'])['last']))
+                with self._position_lock:
+                    if current_price > self._state.get('max_price', Decimal('0')):
+                        self._state['max_price'] = current_price
+
+                # Compute trailing stop price based on max_price
+                stop_price = self._state['max_price'] * (Decimal('1') - self._state['trailing_stop'])
+
+                # Check if stop hit
                 if current_price <= stop_price:
-                    logger.info("Stop loss activado a %.4f", stop_price)
+                    logger.info("Trailing stop activado a %.4f", stop_price)
                     self.execute_sell()
                     break
-                
-                # Actualizar trailing stop dinámico
-                new_stop = current_price * (1 - self._state['trailing_stop'])
-                if new_stop > self._state['entry_price']:
-                    with self._position_lock:
-                        self._state['entry_price'] = new_stop
-                        self._state['last_update'] = time.time()
-                    logger.debug("Trailing actualizado: %.4f", new_stop)
-                
+
                 time.sleep(30)
-                
+
             except Exception as e:
                 logger.error("Error en monitorización: %s", str(e))
                 db_manager.log_error("position_manager_error", str(e))
