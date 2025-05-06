@@ -200,31 +200,20 @@ class ExchangeClient:
 
     def create_market_order(self, symbol: str, side: str, amount: float, trailing_stop: float = None):
         """
-        Ejecuta una orden de mercado.
+        Ejecuta una orden de mercado. Si se especifica trailing_stop, se envía como orden 'stop-loss-trailing'.
         """
-        from decimal import Decimal
         symbol_norm = self._normalize_symbol(symbol)
-
-        # 1) colocamos la orden de mercado
-        order = self.client.create_order(symbol_norm, 'market', side, amount)
-
-        # 2) si vienen parámetros de trailing, colocamos la orden stop-loss-trailing
         if trailing_stop is not None:
-            # traemos el precio de referencia (último)
-            ticker = self.client.fetch_ticker(symbol_norm)
-            ref_price = Decimal(str(ticker['last']))
-            # offset absoluto = precio_actual * porcentaje_trailing
-            offset = (ref_price * Decimal(str(trailing_stop))).quantize(Decimal('0.00000001'))
-            # colocamos la orden de trailing stop (venta)
-            self.client.create_order(
+            return self.client.create_order(
                 symbol_norm,
-                'stop-loss-trailing',   # CCXT lo mapea a ordertype=stop-loss-trailing
-                'sell',
+                'stop-loss-trailing',
+                side,
                 amount,
-                float(offset),          # Kraken espera offset en unidades de precio
+                None,
+                {'trailing_stop': trailing_stop}
             )
-
-        return order
+        else:
+            return self.client.create_order(symbol_norm, 'market', side, amount)
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         normalized_symbol = self._normalize_symbol(symbol)
