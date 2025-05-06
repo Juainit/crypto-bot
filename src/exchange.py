@@ -168,7 +168,12 @@ class ExchangeClient:
             precision = 8  # Valor seguro por defecto
 
         try:
-            step = Decimal("1e-" + str(precision))
+            try:
+                step = Decimal('1') / (Decimal('10') ** int(precision))
+            except Exception:
+                logger.warning(f"Precision inválida para {symbol}: {precision}. Se usará 8 por defecto.")
+                precision = 8
+                step = Decimal('1') / (Decimal('10') ** 8)
             amt = Decimal(str(amount)).quantize(step, rounding=ROUND_DOWN)
             logger.debug(f"Cantidad ajustada para {symbol}: {amt}")
             return float(amt)
