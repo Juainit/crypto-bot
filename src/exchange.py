@@ -59,13 +59,14 @@ class ExchangeClient:
         return ccxt.kraken({
             'apiKey': api_key,
             'secret': api_secret,
+            'timeout': 30000,  # 30 segundos
             'enableRateLimit': True,
             'options': {
                 'adjustForTimeDifference': True,
                 'recvWindow': 20000,
-                'rateLimit': 3500
-            },
-            'timeout': 30000
+                'rateLimit': 3500,
+                'numRetries': 3
+            }
         })
 
     def _load_markets_with_retry(self, exchange, max_retries=3):
