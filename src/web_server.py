@@ -9,7 +9,7 @@ from functools import wraps
 from typing import Dict, Optional, Tuple
 from flask import Flask, request, jsonify
 import ccxt
-from src.config import config
+from src.config import INITIAL_CAPITAL, WEB_SERVER_PORT
 from src.exchange import exchange_client
 from src.database import db_manager  # Nueva importación
 
@@ -124,7 +124,7 @@ class TradingEngine:
             'entry_price': Decimal('0'),
             'size': Decimal('0'),
             'trailing_stop': Decimal('0.02'),
-            'capital': Decimal(str(config.INITIAL_CAPITAL))
+            'capital': Decimal(str(INITIAL_CAPITAL))
         }
 
     @property
@@ -287,11 +287,11 @@ class TradingEngine:
             # Persistir en DB
             db_manager.transactional([
                 ("UPDATE positions SET exit_price = %s, closed = TRUE, profit = %s WHERE closed = FALSE",
-                 (float(price), float(new_capital - config.INITIAL_CAPITAL))),
+                 (float(price), float(new_capital - INITIAL_CAPITAL))),
                 ("UPDATE capital SET balance = %s", (float(new_capital),))
             ])
             
-            logger.info("Venta ejecutada correctamente. Beneficio: €%.2f", new_capital - config.INITIAL_CAPITAL)
+            logger.info("Venta ejecutada correctamente. Beneficio: €%.2f", new_capital - INITIAL_CAPITAL)
             return True, order['id']
             
         except Exception as e:
@@ -395,7 +395,7 @@ def run_server():
     serve(
         app,
         host="0.0.0.0",
-        port=config.WEB_SERVER_PORT,
+        port=WEB_SERVER_PORT,
         threads=4,
         channel_timeout=600,
         connection_limit=50
@@ -404,9 +404,9 @@ def run_server():
 if __name__ == '__main__':
     print("\n" + "="*50)
     print("🚀 SERVICIO DE TRADING AUTOMATIZADO - PRODUCCIÓN")
-    print(f"• Endpoint: http://0.0.0.0:{config.WEB_SERVER_PORT}")
+    print(f"• Endpoint: http://0.0.0.0:{WEB_SERVER_PORT}")
     print(f"• Entorno: {os.getenv('ENV', 'production')}")
-    print(f"• Capital inicial: {config.INITIAL_CAPITAL}€")
+    print(f"• Capital inicial: {INITIAL_CAPITAL}€")
     print("="*50 + "\n")
 
     run_server()
