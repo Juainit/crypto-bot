@@ -103,3 +103,7 @@ try:
 except Exception as e:
     logger.critical("Error fatal en configuración: %s", str(e))
     raise
+    @property
+    def WATCH_INTERVAL(self) -> int:
+        """Intervalo de vigilancia del precio en segundos"""
+        return int(os.getenv("WATCH_INTERVAL", "30"))

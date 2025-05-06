@@ -21,6 +21,7 @@ class DatabaseManager:
         self.pool = None
         self._initialize_pool()
         self._test_connection()
+        self._initialize_positions_table()
 
     def _initialize_pool(self) -> None:
         """Configuración profesional del connection pool"""
@@ -135,6 +136,53 @@ class DatabaseManager:
             )
         except Exception as e:
             logger.error(f"Error registrando fallo: {str(e)}")
+
+    def _initialize_positions_table(self) -> None:
+        create_table_sql = """
+        CREATE TABLE IF NOT EXISTS positions (
+            id SERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            amount NUMERIC NOT NULL,
+            entry_price NUMERIC NOT NULL,
+            trailing_pct NUMERIC NOT NULL,
+            highest_price NUMERIC NOT NULL,
+            stop_price NUMERIC NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+        )
+        """
+        self.execute_query(create_table_sql)
+
+    def add_position(self, symbol: str, side: str, amount: float, entry_price: float, trailing_pct: float, highest_price: float, stop_price: float) -> int:
+        insert_sql = """
+        INSERT INTO positions (symbol, side, amount, entry_price, trailing_pct, highest_price, stop_price)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """
+        result = self.execute_query(insert_sql, (symbol, side, amount, entry_price, trailing_pct, highest_price, stop_price))
+        return result[0][0] if result else None
+
+    def get_open_positions(self) -> List[Tuple]:
+        select_sql = "SELECT * FROM positions WHERE status = 'open'"
+        return self.execute_query(select_sql)
+
+    def update_position(self, position_id: int, highest_price: float, stop_price: float, status: Optional[str] = None) -> None:
+        if status is not None:
+            update_sql = """
+            UPDATE positions
+            SET highest_price = %s, stop_price = %s, status = %s
+            WHERE id = %s
+            """
+            params = (highest_price, stop_price, status, position_id)
+        else:
+            update_sql = """
+            UPDATE positions
+            SET highest_price = %s, stop_price = %s
+            WHERE id = %s
+            """
+            params = (highest_price, stop_price, position_id)
+        self.execute_query(update_sql, params)
 
 # Instancia global para uso en otros módulos
 db_manager = DatabaseManager()

@@ -182,12 +182,20 @@ class TradingEngine:
                     'max_price': price,  # Inicializar max_price con entry price
                 })
                 
-                # Persistir en DB
-                db_manager.transactional([
-                    ("INSERT INTO positions (symbol, entry_price, size, trailing_stop, remaining_capital) VALUES (%s, %s, %s, %s, %s)",
-                     (symbol, float(price), float(amount), float(trailing_stop), 0.0)),
-                    ("UPDATE capital SET balance = %s", (0.0,))
-                ])
+                # Persistir en DB usando modelo Position
+                from src.models import Position  # Asegúrate de que esta importación exista
+
+                pos = Position(
+                    symbol=symbol,
+                    amount=float(amount),
+                    entry_price=float(price),
+                    highest_price=float(price),
+                    trailing_pct=trailing_stop,
+                    stop_price=float(price * (Decimal('1') - Decimal(str(trailing_stop)))),
+                    status="open"
+                )
+                db_manager.insert_position(pos)
+                db_manager.execute_query("UPDATE capital SET balance = %s", (0.0,))
                 
                 # Iniciar monitorización
                 Thread(
