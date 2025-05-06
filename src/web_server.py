@@ -154,6 +154,7 @@ class TradingEngine:
                 
                 # Ejecutar orden
                 payload = request.get_json() if request else {}
+                logger.info(f"Orden {('MARKET' if payload.get('market') else 'LIMIT')} -> {symbol} | amount={amount} | price={price}")
                 if payload.get("market", False):
                     order = exchange_client.create_market_order(
                         symbol=symbol,
