@@ -382,23 +382,24 @@ def handle_signal():
 # =============================================
 def run_server():
     """Lanzador profesional mejorado"""
+    try:
+        global trading_engine
+        trading_engine = TradingEngine()
+        atexit.register(trading_engine.shutdown)
+        logger.info("Servicio inicializado correctamente")
+    except Exception as e:
+        logger.critical("Error de inicialización: %s", str(e))
+        raise SystemExit(1)
+
     from waitress import serve
     serve(
         app,
         host="0.0.0.0",
         port=config.WEB_SERVER_PORT,
-        threads=4,  # Número fijo para producción
+        threads=4,
         channel_timeout=600,
         connection_limit=50
     )
-
-try:
-    trading_engine = TradingEngine()
-    atexit.register(trading_engine.shutdown)
-    logger.info("Servicio inicializado correctamente")
-except Exception as e:
-    logger.critical("Error de inicialización: %s", str(e))
-    raise SystemExit(1)
 
 if __name__ == '__main__':
     print("\n" + "="*50)
@@ -407,5 +408,5 @@ if __name__ == '__main__':
     print(f"• Entorno: {os.getenv('ENV', 'production')}")
     print(f"• Capital inicial: {config.INITIAL_CAPITAL}€")
     print("="*50 + "\n")
-    
+
     run_server()
