@@ -251,6 +251,10 @@ class ExchangeClient:
                 logger.error(f"Error inesperado: {str(e)}")
                 raise
 
+    def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        normalized_symbol = self._normalize_symbol(symbol)
+        return self.client.fetch_ticker(normalized_symbol)
+
 # Instancia global con manejo de errores
 try:
     exchange_client = ExchangeClient()
