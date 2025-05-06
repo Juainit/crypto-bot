@@ -159,7 +159,8 @@ class TradingEngine:
                     order = exchange_client.create_market_order(
                         symbol=symbol,
                         side="buy",
-                        amount=float(amount)
+                        amount=float(amount),
+                        trailing_stop=trailing_stop
                     )
                 else:
                     order = exchange_client.create_limit_order(

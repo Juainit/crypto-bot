@@ -206,8 +206,7 @@ class ExchangeClient:
                     type='limit',
                     side=side,
                     amount=amount,
-                    price=price,
-                    params={'nonce': self._get_nonce()}
+                    price=price
                 )
                 self.client.verbose = False
 
@@ -241,6 +240,7 @@ class ExchangeClient:
         symbol: str,
         side: str,
         amount: float,
+        trailing_stop: Optional[float] = None,
         max_retries: int = 3
     ) -> Dict[str, Any]:
         side = side.lower()
@@ -256,6 +256,28 @@ class ExchangeClient:
         if amount < min_amount:
             raise ValueError(f"Cantidad {amount} menor al mínimo {min_amount} para {symbol}")
 
+        # Preparar parámetros de cierre con trailing stop si se solicita
+        params: Dict[str, Any] = {}
+        if trailing_stop is not None:
+            # Obtener precio actual para calcular offset
+            ticker = self.client.fetch_ticker(normalized_symbol)
+            last_price = ticker.get('last') or ticker.get('close', {}).get('last')
+            if last_price is None:
+                raise ValueError("No se pudo obtener el precio actual para trailing stop")
+            # Calcular offset: porcentaje si <1, valor absoluto en caso contrario
+            if float(trailing_stop) < 1:
+                offset_value = Decimal(str(trailing_stop)) * Decimal(str(last_price))
+            else:
+                offset_value = Decimal(str(trailing_stop))
+            # Ajustar precision de price
+            price_prec = self.client.market(normalized_symbol)['precision']['price']
+            step = Decimal('1') / (Decimal('10') ** price_prec)
+            offset = offset_value.quantize(step, rounding=ROUND_UP)
+            offset_str = str(offset)
+            params['close[ordertype]'] = 'trailing-stop'
+            params['close[price]'] = offset_str
+            logger.info(f"✅ Orden de mercado con trailing stop establecido: {side.upper()} {amount} {normalized_symbol}, offset={offset_str}")
+
         for attempt in range(max_retries):
             try:
                 self.client.verbose = True
@@ -264,7 +286,8 @@ class ExchangeClient:
                     type='market',
                     side=side,
                     amount=amount,
-                    params={'nonce': self._get_nonce()}
+                    price=None,
+                    params=params
                 )
                 self.client.verbose = False
 
