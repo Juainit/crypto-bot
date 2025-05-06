@@ -199,6 +199,7 @@ class ExchangeClient:
 
         for attempt in range(max_retries):
             try:
+                self.client.verbose = True
                 order = self.client.create_order(
                     symbol=normalized_symbol,
                     type='limit',
@@ -207,6 +208,7 @@ class ExchangeClient:
                     price=price,
                     params={'nonce': self._get_nonce()}
                 )
+                self.client.verbose = False
 
                 logger.info(
                     f"Orden {order['id']} creada | {normalized_symbol} | "
@@ -249,6 +251,7 @@ class ExchangeClient:
 
         for attempt in range(max_retries):
             try:
+                self.client.verbose = True
                 order = self.client.create_order(
                     symbol=normalized_symbol,
                     type='market',
@@ -256,6 +259,7 @@ class ExchangeClient:
                     amount=amount,
                     params={'nonce': self._get_nonce()}
                 )
+                self.client.verbose = False
 
                 logger.info(
                     f"Orden de mercado {order['id']} ejecutada | {normalized_symbol} | "
