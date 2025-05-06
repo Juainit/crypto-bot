@@ -117,8 +117,9 @@ def main() -> None:
         StartupValidator.initialize_components()
 
         from src.watcher import Watcher
-        watcher = Watcher()
-        watcher.start()
+        from src.database import db_manager
+        from src.exchange import exchange_client
+        watcher = Watcher(db=db_manager, exchange=exchange_client)
 
         import atexit
         atexit.register(watcher.stop)
