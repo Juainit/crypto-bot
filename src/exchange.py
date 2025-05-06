@@ -161,11 +161,20 @@ class ExchangeClient:
 
     def _adjust_amount_to_step(self, amount: float, symbol: str) -> float:
         market = self.client.market(symbol)
-        precision = market['precision'].get('amount', 8)
-        step = Decimal("1e-" + str(precision))
-        amt = Decimal(str(amount)).quantize(step, rounding=ROUND_DOWN)
-        logger.debug(f"Cantidad ajustada para {symbol}: {amt}")
-        return float(amt)
+        precision = market['precision'].get('amount', None)
+
+        if not isinstance(precision, int):
+            logger.warning(f"Precision inválida para {symbol}: {precision}. Se usará 8 por defecto.")
+            precision = 8  # Valor seguro por defecto
+
+        try:
+            step = Decimal("1e-" + str(precision))
+            amt = Decimal(str(amount)).quantize(step, rounding=ROUND_DOWN)
+            logger.debug(f"Cantidad ajustada para {symbol}: {amt}")
+            return float(amt)
+        except Exception as e:
+            logger.error(f"Error al ajustar amount para {symbol}: {e}")
+            raise
 
     def create_limit_order(
         self,
