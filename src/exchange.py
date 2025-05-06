@@ -182,11 +182,10 @@ class ExchangeClient:
             logger.error(f"Error al ajustar amount para {symbol}: {e}")
             raise
 
-    def create_limit_order(self, symbol: str, side: str, amount: float, price: float, trailing_stop: float = None):
+    def create_limit_order(self, symbol: str, side: str, amount: float, price: float):
         """
         Ejecuta una orden limitada.
         """
-        from decimal import Decimal
         symbol_norm = self._normalize_symbol(symbol)
         order = self.client.create_order(symbol_norm, 'limit', side, amount, price)
         return order
