@@ -153,12 +153,20 @@ class TradingEngine:
                     return False, f"Monto mínimo no alcanzado: {market['limits']['amount']['min']}"
                 
                 # Ejecutar orden
-                order = exchange_client.create_limit_order(
-                    symbol=symbol,
-                    side='buy',
-                    amount=float(amount),
-                    price=float(price)
-                )
+                payload = request.get_json() if request else {}
+                if payload.get("market", False):
+                    order = exchange_client.create_market_order(
+                        symbol=symbol,
+                        side="buy",
+                        amount=float(amount)
+                    )
+                else:
+                    order = exchange_client.create_limit_order(
+                        symbol=symbol,
+                        side="buy",
+                        amount=float(amount),
+                        price=float(price)
+                    )
                 
                 # Actualizar estado
                 self._state.update({
