@@ -2,9 +2,9 @@ import threading
 import time
 import logging
 
-from database import DatabaseManager
-from exchange import KrakenClient
-import config
+from .database import DatabaseManager
+from .exchange import KrakenClient
+from . import config
 
 logger = logging.getLogger(__name__)
 
