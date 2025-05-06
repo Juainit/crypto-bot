@@ -187,6 +187,41 @@ class TradingBot:
             logger.critical(f"Error en venta: {str(e)}", exc_info=True)
             return False, str(e)
 
+    @synchronized('_lock')
+    def execute_buy(self, symbol: str, trailing: Decimal) -> Tuple[bool, str]:
+        """Ejecución de compra con configuración de trailing stop"""
+        try:
+            ticker = exchange_client.fetch_ticker(symbol)
+            price = Decimal(str(ticker['ask'])).quantize(Decimal('0.00000001'))
+            amount = (self._state['capital'] / price).quantize(Decimal('0.00000001'), rounding=ROUND_UP)
+            order = exchange_client.create_market_order(
+                symbol=symbol,
+                side='buy',
+                amount=float(amount)
+            )
+            self._state['order_id'] = order['id']
+            self._state.update({
+                'active': True,
+                'symbol': symbol,
+                'entry_price': price,
+                'size': amount,
+                'trailing_stop': trailing
+            })
+            initial_stop = price * (Decimal('1') - trailing)
+            self._state['current_stop'] = initial_stop
+            self._state['capital'] -= price * amount
+            db_manager.transactional([
+                ("INSERT INTO positions (symbol, entry_price, size, trailing_stop) VALUES (%s, %s, %s, %s)",
+                 (symbol, float(price), float(amount), float(trailing)))
+            ])
+            self._trade_logger.info(
+                f"COMPRA | {symbol} | Precio: {price:.8f} | Tamaño: {amount} | Trailing: {trailing}"
+            )
+            return True, order['id']
+        except Exception as e:
+            logger.critical(f"Error en compra: {str(e)}", exc_info=True)
+            return False, str(e)
+
     def manage_orders(self):
         """Gestión activa de órdenes con trailing stop"""
         logger.info("Iniciando monitorización de posiciones")
@@ -263,8 +298,8 @@ def handle_webhook():
             trailing_cfg = float(data.get("trailing_stop", 0.02))
             logger.info(f"🔔 Señal recibida para {symbol}")
             # Normalización y obtención del mercado
-            normalized = exchange_client._normalize_symbol(symbol)
-            market = exchange_client.client.market(normalized)
+            # normalized = exchange_client._normalize_symbol(symbol)
+            # market = exchange_client.client.market(normalized)
             if bot._state['active'] and bot._state['symbol'] == symbol:
                 logger.info(f"❌ Ya hay posición abierta para {symbol}")
             else:

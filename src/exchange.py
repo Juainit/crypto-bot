@@ -189,36 +189,13 @@ class ExchangeClient:
         from decimal import Decimal
         symbol_norm = self._normalize_symbol(symbol)
         order = self.client.create_order(symbol_norm, 'limit', side, amount, price)
-
-        if trailing_stop is not None:
-            # mismo procedimiento de offset
-            ticker = self.client.fetch_ticker(symbol_norm)
-            ref_price = Decimal(str(ticker['last']))
-            offset = (ref_price * Decimal(str(trailing_stop))).quantize(Decimal('0.00000001'))
-            self.client.create_order(symbol_norm, 'stop-loss-trailing', 'sell', amount, float(offset))
         return order
 
     def create_market_order(self, symbol: str, side: str, amount: float, trailing_stop: float = None):
         """
-        Ejecuta una orden de mercado. Si se especifica trailing_stop, se envía como orden 'stop-loss-trailing'.
+        Ejecuta una orden de mercado; el parámetro trailing_stop se ignora (gestión interna del bot).
         """
         symbol_norm = self._normalize_symbol(symbol)
-        if trailing_stop is not None:
-            from decimal import Decimal
-            # compute absolute offset based on current market price
-            ticker = self.client.fetch_ticker(symbol_norm)
-            ref_price = Decimal(str(ticker['last']))
-            offset = (ref_price * Decimal(str(trailing_stop))).quantize(Decimal('0.00000001'))
-            # Kraken expects a relative price with '+' prefix for trailing stops
-            relative_offset = f"+{offset}"
-            return self.client.create_order(
-                symbol_norm,
-                'stop-loss-trailing',
-                side,
-                amount,
-                relative_offset  # pass offset as price parameter
-            )
-        # fallback to market order
         return self.client.create_order(symbol_norm, 'market', side, amount)
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
