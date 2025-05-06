@@ -1,14 +1,18 @@
+# src/watcher.py
+from src.config   import WATCH_INTERVAL
+from src.database import db_manager
+from src.exchange import exchange_client
 import time
 import threading
 import logging
-from src.config import WATCH_INTERVAL
 
 logger = logging.getLogger("Watcher")
 
 class Watcher:
-    def __init__(self, db, exchange):
-        self.db = db
-        self.exchange = exchange
+    def __init__(self, interval: float = WATCH_INTERVAL):
+        self.interval = interval
+        self.db = db_manager
+        self.exchange = exchange_client
         self.running = False
         self.thread = None
 
@@ -31,7 +35,7 @@ class Watcher:
                 self.check_positions()
             except Exception as e:
                 logger.error(f"Error in watcher loop: {e}")
-            time.sleep(WATCH_INTERVAL)
+            time.sleep(self.interval)
 
     def check_positions(self):
         positions = self.db.get_open_positions()
