@@ -119,6 +119,9 @@ def main() -> None:
         from src.watcher import Watcher
         watcher = Watcher()
         watcher.start()
+
+        import atexit
+        atexit.register(watcher.stop)
         
         # Fase 5: Lanzamiento del servicio
         logger.info("Iniciando servidor web en puerto %d", config.WEB_SERVER_PORT)
